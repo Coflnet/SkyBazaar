@@ -27,7 +27,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
     }
     public class BazaarService : ISessionContainer
     {
-        private const string TABLE_NAME_DAILY = "QuickStatusDaly";
+        private const string TABLE_NAME_DAILY_OLD = "QuickStatusDaly";
+        private const string TABLE_NAME_DAILY = "QuickStatusDaily";
         private const string TABLE_NAME_HOURLY = "QuickStatusHourly";
         private const string TABLE_NAME_MINUTES = "QuickStatusMin";
         private const string TABLE_NAME_SECONDS = "QuickStatusSeconds";
@@ -390,7 +391,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
         public static Table<AggregatedQuickStatus> GetDaysTable(ISession session)
         {
-            return new Table<AggregatedQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_DAILY);
+            return new Table<AggregatedQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_DAILY_OLD);
         }
 
         public static Table<AggregatedQuickStatus> GetHoursTable(ISession session)
@@ -406,6 +407,42 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         public static Table<StorageQuickStatus> GetSmalestTable(ISession session)
         {
             return new Table<StorageQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_SECONDS);
+        }
+        public static Table<AggregatedQuickStatus> GetNewDaysTable(ISession session)
+        {
+            // TODO rename table when migrating
+            return new Table<AggregatedQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_DAILY);
+        }
+        public static Table<SplitAggregatedQuickStatus> GetSplitHoursTable(ISession session)
+        {
+            var mapping = new MappingConfiguration().Define(
+                new Map<SplitAggregatedQuickStatus>()
+                    .PartitionKey(f => f.ProductId, f => f.QuaterId)
+                    .ClusteringKey(f => f.TimeStamp)
+                    .TableName(TABLE_NAME_SECONDS)
+            );
+            return new Table<SplitAggregatedQuickStatus>(session, mapping, TABLE_NAME_HOURLY);
+        }
+        public static Table<SplitAggregatedQuickStatus> GetSplitMinutesTable(ISession session)
+        {
+            var mapping = new MappingConfiguration().Define(
+                new Map<SplitAggregatedQuickStatus>()
+                    .PartitionKey(f => f.ProductId, f => f.QuaterId)
+                    .ClusteringKey(f => f.TimeStamp)
+                    .TableName(TABLE_NAME_SECONDS)
+            );
+            return new Table<SplitAggregatedQuickStatus>(session, mapping, TABLE_NAME_MINUTES);
+        }
+
+        public static Table<StorageQuickStatus> GetSplitSmalestTable(ISession session)
+        {
+            var mapping = new MappingConfiguration().Define(
+                new Map<SplitStorageQuickStatus>()
+                    .PartitionKey(f => f.ProductId, f => f.WeekId)
+                    .ClusteringKey(f => f.TimeStamp)
+                    .TableName(TABLE_NAME_SECONDS)
+            );
+            return new Table<StorageQuickStatus>(session, mapping, TABLE_NAME_SECONDS);
         }
 
         public async Task AddEntry(BazaarPull pull)
@@ -515,7 +552,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         {
             var length = (end - start);
             if (length < TimeSpan.FromHours(1))
-                return TABLE_NAME_SECONDS;  // one every 10 seconds
+                return TABLE_NAME_SECONDS;  // one every 10/20 seconds
             if (length < TimeSpan.FromHours(24))
                 return TABLE_NAME_MINUTES; // 1 per 5 min
             if (length < TimeSpan.FromDays(7.01f))

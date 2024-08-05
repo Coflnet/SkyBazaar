@@ -3,6 +3,10 @@ using Newtonsoft.Json;
 
 namespace Coflnet.Sky.SkyBazaar.Models
 {
+    public class SplitAggregatedQuickStatus : AggregatedQuickStatus
+    {
+        public short QuaterId { get; set; }
+    }
     /// <summary>
     /// Special version of 
     /// </summary>

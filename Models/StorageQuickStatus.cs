@@ -6,6 +6,10 @@ using Newtonsoft.Json;
 
 namespace Coflnet.Sky.SkyBazaar.Models
 {
+    public class SplitStorageQuickStatus : StorageQuickStatus
+    {
+        public short WeekId { get; set; }
+    }
     public class StorageQuickStatus
     {
         [Key(0)]
