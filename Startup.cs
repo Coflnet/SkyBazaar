@@ -58,13 +58,14 @@ namespace Coflnet.Sky.SkyAuctionTracker
                     .EnableSensitiveDataLogging() // <-- These two calls are optional but help
                     .EnableDetailedErrors()       // <-- with debugging (remove for production).
             );
-            services.AddHostedService<BazaarBackgroundService>();
             services.AddHostedService<AggregationService>();
             if (Configuration["OLD_CASSANDRA:HOSTS"] != null)
             {
                 services.AddSingleton<MigrationService>();
                 services.AddHostedService(d => d.GetService<MigrationService>());
             }
+            else
+                services.AddHostedService<BazaarBackgroundService>();
             services.AddCoflnetCore();
             // services.AddJaeger(Configuration);
             services.AddSingleton<BazaarService>();
