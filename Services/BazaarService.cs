@@ -28,7 +28,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
     public class BazaarService : ISessionContainer
     {
         private const string TABLE_NAME_DAILY_OLD = "QuickStatusDaly";
-        private const string TABLE_NAME_DAILY = "QuickStatusDaily";
+        private const string TABLE_NAME_DAILY = "QuickStatusDaly";
         private const string TABLE_NAME_HOURLY = "QuickStatusHourly";
         private const string TABLE_NAME_MINUTES = "QuickStatusMin";
         private const string TABLE_NAME_SECONDS = "QuickStatusSeconds";
@@ -202,7 +202,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             var minutes = GetMinutesTable(session);
 
             // minute loop
-            var startDate = new DateTime(2020, 3, 10);
+            var startDate = new DateTime(2024, 8, 10);
             var length = TimeSpan.FromHours(6);
             // stonks have always been on bazaar
             string[] ids = await GetAllItemIds();
@@ -237,8 +237,6 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             }
 
             await Task.WhenAll(workers);
-
-
         }
 
         private static async Task NewMethod(ISession session, DateTime startDate, TimeSpan length, string itemId)
@@ -368,12 +366,12 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             var session = await GetSession();
 
             // await session.ExecuteAsync(new SimpleStatement("DROP table Flip;"));
-            Table<StorageQuickStatus> tenseconds = GetSmalestTable(session);
+            Table<StorageQuickStatus> tenseconds = GetSplitSmalestTable(session);
             await tenseconds.CreateIfNotExistsAsync();
 
-            var minutes = GetMinutesTable(session);
+            var minutes = GetSplitMinutesTable(session);
             await minutes.CreateIfNotExistsAsync();
-            var hours = GetHoursTable(session);
+            var hours = GetSplitHoursTable(session);
             await hours.CreateIfNotExistsAsync();
             var daily = GetDaysTable(session);
             await daily.CreateIfNotExistsAsync();
@@ -451,7 +449,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             await AddEntry(new List<BazaarPull> { pull }, session);
         }
 
-        public async Task AddEntry(IEnumerable<BazaarPull> pull, ISession session = null)
+        public async Task AddEntry(IEnumerable<BazaarPull> pull, ISession session = null, bool useSplit = false)
         {
             if (session == null)
                 session = await GetSession();
@@ -484,6 +482,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             })).ToList();
 
             currentState = inserts;
+            var splitTable = GetSplitSmalestTable(session);
 
             Console.WriteLine($"inserting {string.Join(',', pull.Select(p => p.Timestamp))}   at {DateTime.UtcNow}");
             await Task.WhenAll(inserts.GroupBy(i => i.ProductId).Select(async status =>
@@ -492,7 +491,10 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 var statement = new BatchStatement();
                 foreach (var item in status)
                 {
-                    statement.Add(table.Insert(item));
+                    if (useSplit)
+                        statement.Add(splitTable.Insert(item));
+                    else
+                        statement.Add(table.Insert(item));
                 }
                 for (int i = 0; i < maxTries; i++)
                     try
