@@ -99,7 +99,7 @@ public class MigrationHandler<T,ToT>
     private async Task<int> InsertBatch(string prefix, IDatabase db, int offset, IPage<T> page, int attempt = 0)
     {
         var batchToInsert = page;
-        var batches = Batch(batchToInsert, (int)(120 / Math.Pow(2, attempt)));
+        var batches = Batch(batchToInsert, (int)(250 / Math.Pow(2, attempt)));
         await Parallel.ForEachAsync(batches, new ParallelOptions() { MaxDegreeOfParallelism = 5 }, async (batch, c) =>
         {
             try
