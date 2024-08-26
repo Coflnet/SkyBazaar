@@ -265,7 +265,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         {
             await AggregateDaysData(session, startDate, TimeSpan.FromDays(2), itemId, GetNewDaysTable(session), async (a, b, c, d) =>
             {
-                var block = await CreateBlockAggregated(a, b, c, d, GetHoursTable(a));
+                var block = await CreateBlockAggregated(a, b, c, d, GetSplitHoursTable(a));
                 return block;
             }, TimeSpan.FromDays(1));
 
@@ -289,7 +289,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         {
             await AggregateMinutesData(session, startDate, TimeSpan.FromDays(1), itemId, GetSplitHoursTable(session), (a, b, c, d) =>
             {
-                return CreateBlockAggregated(a, b, c, d, GetMinutesTable(a));
+                return CreateBlockAggregated(a, b, c, d, GetSplitMinutesTable(a));
             }, TimeSpan.FromHours(2));
         }
 
@@ -368,7 +368,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             result.Count = (short)block.Count();
             return new(result);
         }
-        private static async Task<SplitAggregatedQuickStatus> CreateBlockAggregated(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd, Table<AggregatedQuickStatus> startingTable)
+        private static async Task<SplitAggregatedQuickStatus> CreateBlockAggregated(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd, Table<SplitAggregatedQuickStatus> startingTable)
         {
             var block = (await startingTable.Where(a => a.ProductId == itemId && a.TimeStamp >= detailedStart && a.TimeStamp < detailedEnd).ExecuteAsync()).ToList();
             if (block.Count() == 0)
