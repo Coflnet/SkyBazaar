@@ -506,6 +506,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     {
                         await insertConcurrencyLock.WaitAsync();
                         statement.SetConsistencyLevel(ConsistencyLevel.Quorum);
+                        statement.SetRoutingKey(splitTable.Insert(status.First()).RoutingKey);
                         await session.ExecuteAsync((IStatement)statement);
                         insertCount.Inc();
                         return;
