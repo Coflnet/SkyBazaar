@@ -165,7 +165,17 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             if (bazaar.All(b => IsTimestampWithinGroup(b.Timestamp, boundary)))
                 return; // nothing to do
             Console.WriteLine("aggregating minutes " + timestamp);
-            _ = Task.Run(async () => await RunAgreggation(session, timestamp));
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await RunAgreggation(session, timestamp);
+                }
+                catch (System.Exception e)
+                {
+                    logger.LogError(e, "aggregation");
+                }
+            });
         }
 
         private static async Task RunAgreggation(ISession session, DateTime timestamp)
@@ -253,15 +263,31 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
         private static async Task AggregateDays(ISession session, DateTime startDate, string itemId)
         {
-            await AggregateMinutesData(session, startDate, TimeSpan.FromDays(2), itemId, GetDaysTable(session), (a, b, c, d) =>
+            await AggregateDaysData(session, startDate, TimeSpan.FromDays(2), itemId, GetNewDaysTable(session), async (a, b, c, d) =>
             {
-                return CreateBlockAggregated(a, b, c, d, GetHoursTable(a));
+                var block = await CreateBlockAggregated(a, b, c, d, GetHoursTable(a));
+                return block;
             }, TimeSpan.FromDays(1));
+
+        }
+
+        private static async Task AggregateDaysData(ISession session, DateTime startDate, TimeSpan length, string itemId, Table<AggregatedQuickStatus> minTable,
+            Func<ISession, string, DateTime, DateTime, Task<AggregatedQuickStatus>> Aggregator, TimeSpan detailedLength, int minCount = 29, DateTime stopTime = default)
+        {
+            if (stopTime == default)
+                stopTime = DateTime.UtcNow;
+            for (var start = startDate; start + length < stopTime; start += length)
+            {
+                var end = start + length;
+                Expression<Func<AggregatedQuickStatus, bool>> currentSelect = DaySelectExpression(itemId, start - detailedLength, end);
+                // check the bigger table for existing records
+                await AggregateAfterCheck<AggregatedQuickStatus>(session, length, itemId, minTable, Aggregator, detailedLength, minCount, start, end, currentSelect);
+            }
         }
 
         private static async Task AggregateHours(ISession session, DateTime startDate, string itemId)
         {
-            await AggregateMinutesData(session, startDate, TimeSpan.FromDays(1), itemId, GetHoursTable(session), (a, b, c, d) =>
+            await AggregateMinutesData(session, startDate, TimeSpan.FromDays(1), itemId, GetSplitHoursTable(session), (a, b, c, d) =>
             {
                 return CreateBlockAggregated(a, b, c, d, GetMinutesTable(a));
             }, TimeSpan.FromHours(2));
@@ -269,7 +295,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
         private static async Task AggregateMinutes(ISession session, DateTime startDate, TimeSpan length, string itemId, DateTime endDate)
         {
-            await AggregateMinutesData(session, startDate, length, itemId, GetMinutesTable(session), CreateBlock, TimeSpan.FromMinutes(5), 29, endDate);
+            await AggregateMinutesData(session, startDate, length, itemId, GetSplitMinutesTable(session), CreateBlock, TimeSpan.FromMinutes(5), 29, endDate);
         }
 
         private static async Task<string[]> GetAllItemIds()
@@ -280,42 +306,50 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             return ids;
         }
 
-        private static async Task AggregateMinutesData(ISession session, DateTime startDate, TimeSpan length, string itemId, Table<AggregatedQuickStatus> minTable,
-            Func<ISession, string, DateTime, DateTime, Task<AggregatedQuickStatus>> Aggregator, TimeSpan detailedLength, int minCount = 29, DateTime stopTime = default)
+        private static async Task AggregateMinutesData(ISession session, DateTime startDate, TimeSpan length, string itemId, Table<SplitAggregatedQuickStatus> minTable,
+            Func<ISession, string, DateTime, DateTime, Task<SplitAggregatedQuickStatus>> Aggregator, TimeSpan detailedLength, int minCount = 29, DateTime stopTime = default)
         {
             if (stopTime == default)
                 stopTime = DateTime.UtcNow;
             for (var start = startDate; start + length < stopTime; start += length)
             {
                 var end = start + length;
+                Expression<Func<SplitAggregatedQuickStatus, bool>> currentSelect = SelectExpression(itemId, start - detailedLength, end);
                 // check the bigger table for existing records
-                var existing = await minTable.Where(SelectExpression(itemId, start - detailedLength, end)).ExecuteAsync();
-                var lookup = existing.GroupBy(e => e.TimeStamp.RoundDown(detailedLength)).Select(e => e.First()).ToDictionary(e => e.TimeStamp.RoundDown(detailedLength));
-                var addCount = 0;
-                var skipped = 0;
-                var lineMinCount = start < new DateTime(2022, 1, 1) ? 1 : minCount;
-                for (var detailedStart = start; detailedStart < end; detailedStart += detailedLength)
-                {
-                    if (lookup.TryGetValue(detailedStart.RoundDown(detailedLength), out AggregatedQuickStatus sum) && sum.Count >= lineMinCount)
-                    {
-                        skipped++;
-                        continue;
-                    }
-
-                    var detailedEnd = detailedStart + detailedLength;
-                    AggregatedQuickStatus result = await Aggregator(session, itemId, detailedStart, detailedEnd);
-                    if (result == null)
-                        continue;
-                    await session.ExecuteAsync(minTable.Insert(result));
-                    addCount += result.Count;
-                }
-                if (length < TimeSpan.FromMinutes(10) && Random.Shared.NextDouble() > 0.1)
-                    continue;
-                Console.WriteLine($"checked {start} {itemId} {addCount}\t{skipped}");
+                await AggregateAfterCheck(session, length, itemId, minTable, Aggregator, detailedLength, minCount, start, end, currentSelect);
             }
         }
 
-        private static async Task<AggregatedQuickStatus> CreateBlock(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd)
+        private static async Task AggregateAfterCheck<T>(ISession session, TimeSpan length, string itemId, Table<T> minTable,
+            Func<ISession, string, DateTime, DateTime, Task<T>> Aggregator, TimeSpan detailedLength, int minCount, DateTime start, DateTime end, Expression<Func<T, bool>> currentSelect)
+             where T : AggregatedQuickStatus
+        {
+            var existing = await minTable.Where(currentSelect).ExecuteAsync();
+            var lookup = existing.GroupBy(e => e.TimeStamp.RoundDown(detailedLength)).Select(e => e.First()).ToDictionary(e => e.TimeStamp.RoundDown(detailedLength));
+            var addCount = 0;
+            var skipped = 0;
+            var lineMinCount = start < new DateTime(2022, 1, 1) ? 1 : minCount;
+            for (var detailedStart = start; detailedStart < end; detailedStart += detailedLength)
+            {
+                if (lookup.TryGetValue(detailedStart.RoundDown(detailedLength), out T sum) && sum.Count >= lineMinCount)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                var detailedEnd = detailedStart + detailedLength;
+                T result = await Aggregator(session, itemId, detailedStart, detailedEnd);
+                if (result == null)
+                    continue;
+                await session.ExecuteAsync(minTable.Insert(result));
+                addCount += result.Count;
+            }
+            if (length < TimeSpan.FromMinutes(10) && Random.Shared.NextDouble() > 0.1)
+                return;
+            Console.WriteLine($"checked {start} {itemId} {addCount}\t{skipped}");
+        }
+
+        private static async Task<SplitAggregatedQuickStatus> CreateBlock(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd)
         {
             var block = (await GetSmalestTable(session).Where(a => a.ProductId == itemId && a.TimeStamp >= detailedStart && a.TimeStamp < detailedEnd).ExecuteAsync())
                         .ToList().Select(qs =>
@@ -332,23 +366,30 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             result.MinBuy = (float)block.Min(b => b.BuyPrice);
             result.MinSell = (float)block.Min(b => b.SellPrice);
             result.Count = (short)block.Count();
-            return result;
+            return new(result);
         }
-        private static async Task<AggregatedQuickStatus> CreateBlockAggregated(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd, Table<AggregatedQuickStatus> startingTable)
+        private static async Task<SplitAggregatedQuickStatus> CreateBlockAggregated(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd, Table<AggregatedQuickStatus> startingTable)
         {
             var block = (await startingTable.Where(a => a.ProductId == itemId && a.TimeStamp >= detailedStart && a.TimeStamp < detailedEnd).ExecuteAsync()).ToList();
             if (block.Count() == 0)
                 return null; // no data for this 
-            var result = new AggregatedQuickStatus(block.First());
-            result.MaxBuy = (float)block.Max(b => b.MaxBuy);
-            result.MaxSell = (float)block.Max(b => b.MaxSell);
-            result.MinBuy = (float)block.Min(b => b.MinBuy);
-            result.MinSell = (float)block.Min(b => b.MinSell);
-            result.Count = (short)block.Sum(b => b.Count);
-            return result;
+            var result = new AggregatedQuickStatus(block.First())
+            {
+                MaxBuy = (float)block.Max(b => b.MaxBuy),
+                MaxSell = (float)block.Max(b => b.MaxSell),
+                MinBuy = (float)block.Min(b => b.MinBuy),
+                MinSell = (float)block.Min(b => b.MinSell),
+                Count = (short)block.Sum(b => b.Count)
+            };
+            return new(result);
         }
 
-        private static Expression<Func<AggregatedQuickStatus, bool>> SelectExpression(string itemId, DateTime start, DateTime end)
+        private static Expression<Func<SplitAggregatedQuickStatus, bool>> SelectExpression(string itemId, DateTime start, DateTime end)
+        {
+            var quarter = SplitAggregatedQuickStatus.GetQuarterId(end);
+            return a => a.ProductId == itemId && a.TimeStamp >= start && a.TimeStamp < end && quarter == a.QuaterId;
+        }
+        private static Expression<Func<AggregatedQuickStatus, bool>> DaySelectExpression(string itemId, DateTime start, DateTime end)
         {
             return a => a.ProductId == itemId && a.TimeStamp >= start && a.TimeStamp < end;
         }
@@ -357,13 +398,13 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         /// 
         /// </summary>
         /// <returns></returns>
-        public async Task Create()
+        public async Task Create(ISession session = null)
         {
             if (ranCreate)
                 return;
             ranCreate = true;
 
-            var session = await GetSession();
+            session ??= await GetSession();
 
             // await session.ExecuteAsync(new SimpleStatement("DROP table Flip;"));
             Table<StorageQuickStatus> tenseconds = GetSplitSmalestTable(session);
@@ -416,8 +457,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 new Map<SplitAggregatedQuickStatus>()
                     .PartitionKey(f => f.ProductId, f => f.QuaterId)
                     .ClusteringKey(f => f.TimeStamp)
-                    .Column(f=>f.BuyOrders, cm=>cm.Ignore())
-                    .Column(f=>f.SellOrders, cm=>cm.Ignore())
+                    .Column(f => f.BuyOrders, cm => cm.Ignore())
+                    .Column(f => f.SellOrders, cm => cm.Ignore())
                     .TableName(TABLE_NAME_SECONDS)
             );
             return new Table<SplitAggregatedQuickStatus>(session, mapping, TABLE_NAME_HOURLY);
@@ -428,8 +469,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 new Map<SplitAggregatedQuickStatus>()
                     .PartitionKey(f => f.ProductId, f => f.QuaterId)
                     .ClusteringKey(f => f.TimeStamp)
-                    .Column(f=>f.BuyOrders, cm=>cm.Ignore())
-                    .Column(f=>f.SellOrders, cm=>cm.Ignore())
+                    .Column(f => f.BuyOrders, cm => cm.Ignore())
+                    .Column(f => f.SellOrders, cm => cm.Ignore())
                     .TableName(TABLE_NAME_SECONDS)
             );
             return new Table<SplitAggregatedQuickStatus>(session, mapping, TABLE_NAME_MINUTES);
@@ -441,8 +482,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 new Map<SplitStorageQuickStatus>()
                     .PartitionKey(f => f.ProductId, f => f.WeekId)
                     .ClusteringKey(f => f.TimeStamp)
-                    .Column(f=>f.BuyOrders, cm=>cm.Ignore())
-                    .Column(f=>f.SellOrders, cm=>cm.Ignore())
+                    .Column(f => f.BuyOrders, cm => cm.Ignore())
+                    .Column(f => f.SellOrders, cm => cm.Ignore())
                     .TableName(TABLE_NAME_SECONDS)
             );
             return new Table<StorageQuickStatus>(session, mapping, TABLE_NAME_SECONDS);
@@ -550,9 +591,12 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     .OrderByDescending(d => d.TimeStamp).Take(count).ExecuteAsync().ConfigureAwait(false))
                     .ToList().Select(s => new AggregatedQuickStatus(s));
             }
-            var loadedFlip = await mapper.FetchAsync<AggregatedQuickStatus>("SELECT * FROM " + tableName
-                + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? Order by Timestamp DESC", productId, start, end).ConfigureAwait(false);
-
+            if (tableName == TABLE_NAME_DAILY_NEW)
+                return await mapper.FetchAsync<AggregatedQuickStatus>("SELECT * FROM " + tableName
+                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? Order by Timestamp DESC", productId, start, end).ConfigureAwait(false);
+            var quarterId = SplitAggregatedQuickStatus.GetQuarterId(end);
+            var loadedFlip = await mapper.FetchAsync<SplitAggregatedQuickStatus>("SELECT * FROM " + tableName
+                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and QuaterId = ? Order by Timestamp DESC", productId, start, end, quarterId).ConfigureAwait(false);
             return loadedFlip.ToList();
         }
 

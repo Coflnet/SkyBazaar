@@ -65,6 +65,7 @@ public class MigrationService : BackgroundService
         using var scope = serviceProvider.CreateScope();
         var bazaarService = scope.ServiceProvider.GetRequiredService<BazaarService>();
         IsDone = true;
+        await bazaarService.Create(session);
         await KafkaConsumer.ConsumeBatch<BazaarPull>(config, config["TOPICS:BAZAAR"], async bazaar =>
         {
             var session = await bazaarService.GetSession();

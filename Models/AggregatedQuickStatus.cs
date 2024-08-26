@@ -18,6 +18,10 @@ namespace Coflnet.Sky.SkyBazaar.Models
             QuaterId = GetQuarterId(status.TimeStamp);
         }
 
+        public SplitAggregatedQuickStatus()
+        {
+        }
+
         public static short GetQuarterId(DateTime timestamp)
         {
             return (short)((timestamp - epoch).TotalDays / 90);
