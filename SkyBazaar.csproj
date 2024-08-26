@@ -17,8 +17,8 @@
   <ItemGroup>
     <PackageReference Include="CassandraCSharpDriver" Version="3.20.1" />
     <PackageReference Include="Coflnet.Core" Aliases="CoflCore" Version="0.2.0" />
-    <PackageReference Include="Coflnet.Sky.EventBroker.Client" Version="0.3.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.NewtonsoftJson" Version="8.0.4" />
+    <PackageReference Include="Coflnet.Sky.EventBroker.Client" Version="0.5.4" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.NewtonsoftJson" Version="8.0.8" />
   </ItemGroup>
 
   <!-- Include tests in Debug build to keep them close to source and easier updated -->
@@ -26,8 +26,8 @@
     <Compile Remove="**\*.Tests.cs" />
   </ItemGroup>
   <ItemGroup Condition="'$(Configuration)' != 'Release'">
-    <PackageReference Include="NUnit3TestAdapter" Version="4.5.0" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.0" />
     <PackageReference Include="Moq" Version="4.20.70" />
   </ItemGroup>
 

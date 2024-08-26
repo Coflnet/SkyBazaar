@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 using Cassandra;
 using Cassandra.Data.Linq;
 using CoflCore::Coflnet.Cassandra;
-using Coflnet.Kafka;
+using Coflnet.Sky.Kafka;
 using Coflnet.Sky.SkyBazaar.Models;
 using dev;
 using Microsoft.Extensions.Configuration;
@@ -41,27 +41,26 @@ public class MigrationService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var handlerLogger = serviceProvider.GetRequiredService<ILogger<MigrationHandler<AggregatedQuickStatus>>>();
-        var dailyHandler = new MigrationHandler<AggregatedQuickStatus>(
+        var handlerLogger = serviceProvider.GetRequiredService<ILogger<MigrationHandler<AggregatedQuickStatus, SplitAggregatedQuickStatus>>>();
+        var dailyLogger = serviceProvider.GetRequiredService<ILogger<MigrationHandler<AggregatedQuickStatus, AggregatedQuickStatus>>>();
+        var dailyHandler = new MigrationHandler<AggregatedQuickStatus, AggregatedQuickStatus>(
                 () => BazaarService.GetDaysTable(oldSession),
-                session, handlerLogger, redis,
-                () => BazaarService.GetDaysTable(session));
+                session, dailyLogger, redis,
+                () => BazaarService.GetNewDaysTable(session),
+                a => a);
         await dailyHandler.Migrate();
-        var hourlyHandler = new MigrationHandler<AggregatedQuickStatus>(
+        var hourlyHandler = new MigrationHandler<AggregatedQuickStatus, SplitAggregatedQuickStatus>(
                 () => BazaarService.GetHoursTable(oldSession),
                 session, handlerLogger, redis,
-                () => BazaarService.GetHoursTable(session));
+                () => BazaarService.GetSplitHoursTable(session),
+                a => new SplitAggregatedQuickStatus(a));
         await hourlyHandler.Migrate();
-        var minutehandler = new MigrationHandler<AggregatedQuickStatus>(
+        var minutehandler = new MigrationHandler<AggregatedQuickStatus, SplitAggregatedQuickStatus>(
                 () => BazaarService.GetMinutesTable(oldSession),
                 session, handlerLogger, redis,
-                () => BazaarService.GetMinutesTable(session));
+                () => BazaarService.GetSplitMinutesTable(session),
+                a => new SplitAggregatedQuickStatus(a));
         await minutehandler.Migrate();
-        var smallestHandler = new MigrationHandler<StorageQuickStatus>(
-                () => BazaarService.GetSmalestTable(oldSession),
-                session, serviceProvider.GetRequiredService<ILogger<MigrationHandler<StorageQuickStatus>>>(), redis,
-                () => BazaarService.GetSmalestTable(session));
-        await smallestHandler.Migrate();
         logger.LogInformation("Migrated, starting to replay kafka");
         using var scope = serviceProvider.CreateScope();
         var bazaarService = scope.ServiceProvider.GetRequiredService<BazaarService>();
@@ -72,7 +71,7 @@ public class MigrationService : BackgroundService
             Console.WriteLine($"retrieved batch {bazaar.Count()}, start processing in migration");
             try
             {
-                await bazaarService.AddEntry(bazaar, session);
+                await bazaarService.AddEntry(bazaar, session, true);
             }
             catch (Exception e)
             {

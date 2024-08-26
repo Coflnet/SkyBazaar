@@ -27,6 +27,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
     }
     public class BazaarService : ISessionContainer
     {
+        private const string TABLE_NAME_DAILY_NEW = "QuickStatusDaly";
         private const string TABLE_NAME_DAILY = "QuickStatusDaly";
         private const string TABLE_NAME_HOURLY = "QuickStatusHourly";
         private const string TABLE_NAME_MINUTES = "QuickStatusMin";
@@ -201,7 +202,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             var minutes = GetMinutesTable(session);
 
             // minute loop
-            var startDate = new DateTime(2020, 3, 10);
+            var startDate = new DateTime(2024, 8, 10);
             var length = TimeSpan.FromHours(6);
             // stonks have always been on bazaar
             string[] ids = await GetAllItemIds();
@@ -236,8 +237,6 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             }
 
             await Task.WhenAll(workers);
-
-
         }
 
         private static async Task NewMethod(ISession session, DateTime startDate, TimeSpan length, string itemId)
@@ -367,14 +366,14 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             var session = await GetSession();
 
             // await session.ExecuteAsync(new SimpleStatement("DROP table Flip;"));
-            Table<StorageQuickStatus> tenseconds = GetSmalestTable(session);
+            Table<StorageQuickStatus> tenseconds = GetSplitSmalestTable(session);
             await tenseconds.CreateIfNotExistsAsync();
 
-            var minutes = GetMinutesTable(session);
+            var minutes = GetSplitMinutesTable(session);
             await minutes.CreateIfNotExistsAsync();
-            var hours = GetHoursTable(session);
+            var hours = GetSplitHoursTable(session);
             await hours.CreateIfNotExistsAsync();
-            var daily = GetDaysTable(session);
+            var daily = GetNewDaysTable(session);
             await daily.CreateIfNotExistsAsync();
 
             try
@@ -392,6 +391,10 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         {
             return new Table<AggregatedQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_DAILY);
         }
+        public static Table<AggregatedQuickStatus> GetNewDaysTable(ISession session)
+        {
+            return new Table<AggregatedQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_DAILY_NEW);
+        }
 
         public static Table<AggregatedQuickStatus> GetHoursTable(ISession session)
         {
@@ -407,6 +410,37 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         {
             return new Table<StorageQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_SECONDS);
         }
+        public static Table<SplitAggregatedQuickStatus> GetSplitHoursTable(ISession session)
+        {
+            var mapping = new MappingConfiguration().Define(
+                new Map<SplitAggregatedQuickStatus>()
+                    .PartitionKey(f => f.ProductId, f => f.QuaterId)
+                    .ClusteringKey(f => f.TimeStamp)
+                    .TableName(TABLE_NAME_SECONDS)
+            );
+            return new Table<SplitAggregatedQuickStatus>(session, mapping, TABLE_NAME_HOURLY);
+        }
+        public static Table<SplitAggregatedQuickStatus> GetSplitMinutesTable(ISession session)
+        {
+            var mapping = new MappingConfiguration().Define(
+                new Map<SplitAggregatedQuickStatus>()
+                    .PartitionKey(f => f.ProductId, f => f.QuaterId)
+                    .ClusteringKey(f => f.TimeStamp)
+                    .TableName(TABLE_NAME_SECONDS)
+            );
+            return new Table<SplitAggregatedQuickStatus>(session, mapping, TABLE_NAME_MINUTES);
+        }
+
+        public static Table<StorageQuickStatus> GetSplitSmalestTable(ISession session)
+        {
+            var mapping = new MappingConfiguration().Define(
+                new Map<SplitStorageQuickStatus>()
+                    .PartitionKey(f => f.ProductId, f => f.WeekId)
+                    .ClusteringKey(f => f.TimeStamp)
+                    .TableName(TABLE_NAME_SECONDS)
+            );
+            return new Table<StorageQuickStatus>(session, mapping, TABLE_NAME_SECONDS);
+        }
 
         public async Task AddEntry(BazaarPull pull)
         {
@@ -414,7 +448,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             await AddEntry(new List<BazaarPull> { pull }, session);
         }
 
-        public async Task AddEntry(IEnumerable<BazaarPull> pull, ISession session = null)
+        public async Task AddEntry(IEnumerable<BazaarPull> pull, ISession session = null, bool useSplit = false)
         {
             if (session == null)
                 session = await GetSession();
@@ -447,6 +481,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             })).ToList();
 
             currentState = inserts;
+            var splitTable = GetSplitSmalestTable(session);
 
             Console.WriteLine($"inserting {string.Join(',', pull.Select(p => p.Timestamp))}   at {DateTime.UtcNow}");
             await Task.WhenAll(inserts.GroupBy(i => i.ProductId).Select(async status =>
@@ -455,7 +490,10 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 var statement = new BatchStatement();
                 foreach (var item in status)
                 {
-                    statement.Add(table.Insert(item));
+                    if (useSplit)
+                        statement.Add(splitTable.Insert(item));
+                    else
+                        statement.Add(table.Insert(item));
                 }
                 for (int i = 0; i < maxTries; i++)
                     try
@@ -515,7 +553,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         {
             var length = (end - start);
             if (length < TimeSpan.FromHours(1))
-                return TABLE_NAME_SECONDS;  // one every 10 seconds
+                return TABLE_NAME_SECONDS;  // one every 10/20 seconds
             if (length < TimeSpan.FromHours(24))
                 return TABLE_NAME_MINUTES; // 1 per 5 min
             if (length < TimeSpan.FromDays(7.01f))

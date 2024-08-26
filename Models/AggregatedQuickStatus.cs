@@ -1,8 +1,28 @@
+using System;
 using MessagePack;
 using Newtonsoft.Json;
 
 namespace Coflnet.Sky.SkyBazaar.Models
 {
+    public class SplitAggregatedQuickStatus : AggregatedQuickStatus
+    {
+        public short QuaterId { get; set; }
+        public static readonly DateTime epoch = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        public SplitAggregatedQuickStatus(AggregatedQuickStatus status) : base(status)
+        {
+            MaxBuy = status.MaxBuy;
+            MaxSell = status.MaxSell;
+            MinBuy = status.MinBuy;
+            MinSell = status.MinSell;
+            Count = status.Count;
+            QuaterId = GetQuarterId(status.TimeStamp);
+        }
+
+        public static short GetQuarterId(DateTime timestamp)
+        {
+            return (short)((timestamp - epoch).TotalDays / 90);
+        }
+    }
     /// <summary>
     /// Special version of 
     /// </summary>

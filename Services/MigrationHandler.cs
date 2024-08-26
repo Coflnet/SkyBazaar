@@ -14,23 +14,25 @@ using StackExchange.Redis;
 
 namespace Coflnet.Sky.SkyAuctionTracker.Services;
 #nullable enable
-public class MigrationHandler<T>
+public class MigrationHandler<T,ToT>
 {
     Func<Table<T>> oldTableFactory;
-    Func<Table<T>> newTableFactory;
+    Func<Table<ToT>> newTableFactory;
     ISession session;
-    ILogger<MigrationHandler<T>> logger;
+    ILogger<MigrationHandler<T,ToT>> logger;
     private readonly ConnectionMultiplexer redis;
     Counter migrated;
     private int pageSize = 2000;
+    Func<T, ToT> map;
 
-    public MigrationHandler(Func<Table<T>> oldTableFactory, ISession session, ILogger<MigrationHandler<T>> logger, ConnectionMultiplexer redis, Func<Table<T>> newTableFactory)
+    public MigrationHandler(Func<Table<T>> oldTableFactory, ISession session, ILogger<MigrationHandler<T, ToT>> logger, ConnectionMultiplexer redis, Func<Table<ToT>> newTableFactory, Func<T, ToT> map)
     {
         this.oldTableFactory = oldTableFactory;
         this.session = session;
         this.logger = logger;
         this.redis = redis;
         this.newTableFactory = newTableFactory;
+        this.map = map;
     }
 
     SemaphoreSlim queryThrottle = new SemaphoreSlim(11);
@@ -150,7 +152,7 @@ public class MigrationHandler<T>
         var batchStatement = new BatchStatement();
         foreach (var score in batchToInsert)
         {
-            batchStatement.Add(newTable.Insert(score));
+            batchStatement.Add(newTable.Insert(map(score)));
         }
         batchStatement.SetConsistencyLevel(ConsistencyLevel.Quorum);
         await session.ExecuteAsync(batchStatement);
