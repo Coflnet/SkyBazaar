@@ -35,7 +35,7 @@ public class MigrationHandler<T,ToT>
         this.map = map;
     }
 
-    SemaphoreSlim queryThrottle = new SemaphoreSlim(11);
+    SemaphoreSlim queryThrottle = new SemaphoreSlim(7);
     public async Task Migrate(CancellationToken stoppingToken = default)
     {
         newTableFactory().CreateIfNotExists();
