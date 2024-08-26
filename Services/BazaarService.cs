@@ -27,7 +27,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
     }
     public class BazaarService : ISessionContainer
     {
-        private const string TABLE_NAME_DAILY_OLD = "QuickStatusDaly";
+        private const string TABLE_NAME_DAILY_NEW = "QuickStatusDaly";
         private const string TABLE_NAME_DAILY = "QuickStatusDaly";
         private const string TABLE_NAME_HOURLY = "QuickStatusHourly";
         private const string TABLE_NAME_MINUTES = "QuickStatusMin";
@@ -373,7 +373,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             await minutes.CreateIfNotExistsAsync();
             var hours = GetSplitHoursTable(session);
             await hours.CreateIfNotExistsAsync();
-            var daily = GetDaysTable(session);
+            var daily = GetNewDaysTable(session);
             await daily.CreateIfNotExistsAsync();
 
             try
@@ -389,7 +389,11 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
         public static Table<AggregatedQuickStatus> GetDaysTable(ISession session)
         {
-            return new Table<AggregatedQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_DAILY_OLD);
+            return new Table<AggregatedQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_DAILY);
+        }
+        public static Table<AggregatedQuickStatus> GetNewDaysTable(ISession session)
+        {
+            return new Table<AggregatedQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_DAILY_NEW);
         }
 
         public static Table<AggregatedQuickStatus> GetHoursTable(ISession session)
@@ -405,11 +409,6 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         public static Table<StorageQuickStatus> GetSmalestTable(ISession session)
         {
             return new Table<StorageQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_SECONDS);
-        }
-        public static Table<AggregatedQuickStatus> GetNewDaysTable(ISession session)
-        {
-            // TODO rename table when migrating
-            return new Table<AggregatedQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_DAILY);
         }
         public static Table<SplitAggregatedQuickStatus> GetSplitHoursTable(ISession session)
         {

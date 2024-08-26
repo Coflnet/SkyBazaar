@@ -46,7 +46,7 @@ public class MigrationService : BackgroundService
         var dailyHandler = new MigrationHandler<AggregatedQuickStatus, AggregatedQuickStatus>(
                 () => BazaarService.GetDaysTable(oldSession),
                 session, dailyLogger, redis,
-                () => BazaarService.GetDaysTable(session),
+                () => BazaarService.GetNewDaysTable(session),
                 a => a);
         await dailyHandler.Migrate();
         var hourlyHandler = new MigrationHandler<AggregatedQuickStatus, SplitAggregatedQuickStatus>(
