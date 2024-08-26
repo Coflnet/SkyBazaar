@@ -416,6 +416,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 new Map<SplitAggregatedQuickStatus>()
                     .PartitionKey(f => f.ProductId, f => f.QuaterId)
                     .ClusteringKey(f => f.TimeStamp)
+                    .Column(f=>f.BuyOrders, cm=>cm.Ignore())
+                    .Column(f=>f.SellOrders, cm=>cm.Ignore())
                     .TableName(TABLE_NAME_SECONDS)
             );
             return new Table<SplitAggregatedQuickStatus>(session, mapping, TABLE_NAME_HOURLY);
@@ -426,6 +428,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 new Map<SplitAggregatedQuickStatus>()
                     .PartitionKey(f => f.ProductId, f => f.QuaterId)
                     .ClusteringKey(f => f.TimeStamp)
+                    .Column(f=>f.BuyOrders, cm=>cm.Ignore())
+                    .Column(f=>f.SellOrders, cm=>cm.Ignore())
                     .TableName(TABLE_NAME_SECONDS)
             );
             return new Table<SplitAggregatedQuickStatus>(session, mapping, TABLE_NAME_MINUTES);
@@ -437,6 +441,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 new Map<SplitStorageQuickStatus>()
                     .PartitionKey(f => f.ProductId, f => f.WeekId)
                     .ClusteringKey(f => f.TimeStamp)
+                    .Column(f=>f.BuyOrders, cm=>cm.Ignore())
+                    .Column(f=>f.SellOrders, cm=>cm.Ignore())
                     .TableName(TABLE_NAME_SECONDS)
             );
             return new Table<StorageQuickStatus>(session, mapping, TABLE_NAME_SECONDS);
