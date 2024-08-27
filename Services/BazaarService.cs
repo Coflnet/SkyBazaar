@@ -421,7 +421,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             try
             {
                 // set timewindow compaction to 14 days
-                await session.ExecuteAsync(new SimpleStatement($"ALTER TABLE {TABLE_NAME_SECONDS} WITH compaction = {{'class': 'TimeWindowCompactionStrategy', 'compaction_window_unit': 'DAYS', 'compaction_window_size': '14'}}"));
+                await session.ExecuteAsync(new SimpleStatement($"ALTER TABLE {TABLE_NAME_SECONDS} WITH compaction = {{'class': 'TimeWindowCompactionStrategy', 'compaction_window_unit': 'DAYS', 'compaction_window_size': '2'}}"));
                 // set default TTL to 14 days
                 await session.ExecuteAsync(new SimpleStatement($"ALTER TABLE {TABLE_NAME_SECONDS} WITH default_time_to_live = 1209600"));
                 logger.LogInformation("Set compaction strategy");
