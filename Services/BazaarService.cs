@@ -420,11 +420,13 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
             try
             {
-                session.Execute($"ALTER TABLE {TABLE_NAME_SECONDS} ADD referenceid BIGINT;");
+                // set timewindow compaction to 14 days
+                await session.ExecuteAsync(new SimpleStatement($"ALTER TABLE {TABLE_NAME_SECONDS} WITH compaction = {{'class': 'TimeWindowCompactionStrategy', 'compaction_window_unit': 'DAYS', 'compaction_window_size': '14'}}"));
+                logger.LogInformation("Set compaction strategy");
             }
             catch (Exception e)
             {
-                Console.WriteLine("referenceid exists already");
+                logger.LogError(e, "compaction strategy");
             }
             //Console.WriteLine("there are this many booster cookies: " + JsonConvert.SerializeObject(session.Execute("Select count(*) from " + TABLE_NAME_SECONDS + " where ProductId = 'BOOSTER_COOKIE' and Timestamp > '2021-12-07'").FirstOrDefault()));
         }
@@ -538,10 +540,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 var statement = new BatchStatement();
                 foreach (var item in status)
                 {
-                    if (useSplit)
-                        statement.Add(splitTable.Insert(item));
-                    else
-                        statement.Add(table.Insert(item));
+                    statement.Add(table.Insert(item));
                 }
                 for (int i = 0; i < maxTries; i++)
                     try
