@@ -370,7 +370,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         }
         private static async Task<SplitAggregatedQuickStatus> CreateBlockAggregated(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd, Table<SplitAggregatedQuickStatus> startingTable)
         {
-            var block = (await startingTable.Where(a => a.ProductId == itemId && a.TimeStamp >= detailedStart && a.TimeStamp < detailedEnd).ExecuteAsync()).ToList();
+            var quarter = SplitAggregatedQuickStatus.GetQuarterId(detailedEnd - TimeSpan.FromSeconds(1));
+            var block = (await startingTable.Where(a => a.ProductId == itemId && a.TimeStamp >= detailedStart && a.TimeStamp < detailedEnd && a.QuaterId == quarter).ExecuteAsync()).ToList();
             if (block.Count() == 0)
                 return null; // no data for this 
             var result = new AggregatedQuickStatus(block.First())
