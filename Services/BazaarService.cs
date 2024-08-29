@@ -50,7 +50,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
         private List<StorageQuickStatus> currentState = new List<StorageQuickStatus>();
         private SemaphoreSlim sessionOpenLock = new SemaphoreSlim(1);
-        private SemaphoreSlim insertConcurrencyLock = new SemaphoreSlim(500);
+        private SemaphoreSlim insertConcurrencyLock = new SemaphoreSlim(50);
 
         private static readonly Prometheus.Histogram checkSuccessHistogram = Prometheus.Metrics
             .CreateHistogram("sky_bazaar_check_success_histogram", "Histogram of successfuly checked elements",
@@ -538,7 +538,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             Console.WriteLine($"inserting {string.Join(',', pull.Select(p => p.Timestamp))}   at {DateTime.UtcNow}");
             await Task.WhenAll(inserts.GroupBy(i => i.ProductId).Select(async status =>
             {
-                var maxTries = 5;
+                var maxTries = 7;
                 var statement = new BatchStatement();
                 foreach (var item in status)
                 {
@@ -560,7 +560,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                         logger.LogError(e, $"storing {status.Key} {status.First().TimeStamp} failed {i} times");
                         await Task.Delay(500 * (i + 1));
                         if (i >= maxTries - 1)
-                            throw e;
+                            throw;
                     }
                     finally
                     {
