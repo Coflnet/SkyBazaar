@@ -50,7 +50,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
         private List<StorageQuickStatus> currentState = new List<StorageQuickStatus>();
         private SemaphoreSlim sessionOpenLock = new SemaphoreSlim(1);
-        private SemaphoreSlim insertConcurrencyLock = new SemaphoreSlim(50);
+        private SemaphoreSlim insertConcurrencyLock = new SemaphoreSlim(20);
 
         private static readonly Prometheus.Histogram checkSuccessHistogram = Prometheus.Metrics
             .CreateHistogram("sky_bazaar_check_success_histogram", "Histogram of successfuly checked elements",
