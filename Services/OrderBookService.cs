@@ -189,20 +189,31 @@ public class OrderBookService
             );
         ArgumentNullException.ThrowIfNull(sessionContainer.Session);
         orderBookTable = new Table<OrderEntry>(sessionContainer.Session, mapping);
-        await orderBookTable.CreateIfNotExistsAsync();
-        var orders = await orderBookTable.Select(o => o).ExecuteAsync();
-        foreach (var order in orders)
-        {
-            var orderBook = cache.GetOrAdd(order.ItemId, (key) =>
+        for (int i = 0; i < 100; i++)
+            try
             {
-                var book = new OrderBook();
-                return book;
-            });
-            var side = orderBook.Sell;
-            if (!order.IsSell)
-                side = orderBook.Buy;
 
-            side.Add(order);
-        }
+                await orderBookTable.CreateIfNotExistsAsync();
+                var orders = await orderBookTable.Select(o => o).ExecuteAsync();
+                foreach (var order in orders)
+                {
+                    var orderBook = cache.GetOrAdd(order.ItemId, (key) =>
+                    {
+                        var book = new OrderBook();
+                        return book;
+                    });
+                    var side = orderBook.Sell;
+                    if (!order.IsSell)
+                        side = orderBook.Buy;
+
+                    side.Add(order);
+                }
+                return;
+            }
+            catch (System.Exception e)
+            {
+                logger.LogError(e, "loading order book");
+                await Task.Delay(10_000 * (i + 1));
+            }
     }
 }
