@@ -42,19 +42,6 @@ public class MigrationService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var handlerLogger = serviceProvider.GetRequiredService<ILogger<MigrationHandler<AggregatedQuickStatus, SplitAggregatedQuickStatus>>>();
-        var dailyLogger = serviceProvider.GetRequiredService<ILogger<MigrationHandler<AggregatedQuickStatus, AggregatedQuickStatus>>>();
-        var dailyHandler = new MigrationHandler<AggregatedQuickStatus, AggregatedQuickStatus>(
-                () => BazaarService.GetDaysTable(oldSession),
-                session, dailyLogger, redis,
-                () => BazaarService.GetNewDaysTable(session),
-                a => a);
-        await dailyHandler.Migrate();
-        var hourlyHandler = new MigrationHandler<AggregatedQuickStatus, SplitAggregatedQuickStatus>(
-                () => BazaarService.GetHoursTable(oldSession),
-                session, handlerLogger, redis,
-                () => BazaarService.GetSplitHoursTable(session),
-                a => new SplitAggregatedQuickStatus(a));
-        await hourlyHandler.Migrate();
         var minutehandler = new MigrationHandler<AggregatedQuickStatus, SplitAggregatedQuickStatus>(
                 () => BazaarService.GetMinutesTable(oldSession),
                 session, handlerLogger, redis,
