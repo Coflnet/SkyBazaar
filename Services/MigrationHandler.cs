@@ -22,7 +22,7 @@ public class MigrationHandler<T, ToT>
     ILogger<MigrationHandler<T, ToT>> logger;
     private readonly ConnectionMultiplexer redis;
     Counter migrated;
-    private int pageSize = 2000;
+    private int pageSize = 8000;
     Func<T, ToT> map;
 
     public MigrationHandler(Func<Table<T>> oldTableFactory, ISession session, ILogger<MigrationHandler<T, ToT>> logger, ConnectionMultiplexer redis, Func<Table<ToT>> newTableFactory, Func<T, ToT> map)
