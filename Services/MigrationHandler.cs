@@ -66,6 +66,8 @@ public class MigrationHandler<T,ToT>
         {
             _ = Task.Run(async () =>
             {
+                if (offset < 262440000)
+                    return; // already migrated but state lost
                 for (int i = 0; i < 10; i++)
                 {
                     try
