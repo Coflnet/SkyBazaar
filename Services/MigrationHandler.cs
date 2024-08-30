@@ -14,12 +14,12 @@ using StackExchange.Redis;
 
 namespace Coflnet.Sky.SkyAuctionTracker.Services;
 #nullable enable
-public class MigrationHandler<T,ToT>
+public class MigrationHandler<T, ToT>
 {
     Func<Table<T>> oldTableFactory;
     Func<Table<ToT>> newTableFactory;
     ISession session;
-    ILogger<MigrationHandler<T,ToT>> logger;
+    ILogger<MigrationHandler<T, ToT>> logger;
     private readonly ConnectionMultiplexer redis;
     Counter migrated;
     private int pageSize = 2000;
@@ -67,7 +67,11 @@ public class MigrationHandler<T,ToT>
             _ = Task.Run(async () =>
             {
                 if (offset < 262440000)
+                {
+                    UpdateMigrateState(prefix, db, offset, page);
+                    Interlocked.Add(ref offset, page.Count);
                     return; // already migrated but state lost
+                }
                 for (int i = 0; i < 10; i++)
                 {
                     try
@@ -110,21 +114,28 @@ public class MigrationHandler<T,ToT>
             }
             catch (System.Exception)
             {
-                if(attempt >= 5)
-                logger.LogError("Insert failed, {Json}", Newtonsoft.Json.JsonConvert.SerializeObject(batch));   
+                if (attempt >= 5)
+                    logger.LogError("Insert failed, {Json}", Newtonsoft.Json.JsonConvert.SerializeObject(batch));
                 throw;
             }
         });
+        offset = UpdateMigrateState(prefix, db, offset, batchToInsert);
+
+        return batchToInsert.Count;
+    }
+
+    private int UpdateMigrateState(string prefix, IDatabase db, int offset, IPage<T> batchToInsert)
+    {
         migrated.Inc(batchToInsert.Count);
         offset += batchToInsert.Count;
         db.StringSet($"{prefix}offset", offset);
-        var queryState = page.PagingState;
+        var queryState = batchToInsert.PagingState;
         if (queryState != null)
         {
             db.StringSet($"{prefix}paging_state", Convert.ToBase64String(queryState));
         }
 
-        return batchToInsert.Count;
+        return offset;
     }
 
     private IEnumerable<IEnumerable<T>> Batch(IEnumerable<T> values, int batchSize)
@@ -132,7 +143,7 @@ public class MigrationHandler<T,ToT>
         var list = new List<T>(batchSize);
         foreach (var value in values)
         {
-            if(value == null)
+            if (value == null)
                 continue;
             list.Add(value);
             if (list.Count == batchSize)
