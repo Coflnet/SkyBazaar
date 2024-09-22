@@ -77,7 +77,10 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
             if (time == default)
                 time = DateTime.UtcNow;
             var entries = await service.GetStatus(itemId, time - TimeSpan.FromMinutes(1), time + TimeSpan.FromSeconds(9), 1);
-            return entries.FirstOrDefault();
+            var match = entries.FirstOrDefault();
+            if (match != default)
+                return match;
+            return (await service.GetStatus(itemId, time - TimeSpan.FromHours(1), time + TimeSpan.FromSeconds(19), 1)).FirstOrDefault();
         }
         /// <summary>
         /// Gets the latest status for an item

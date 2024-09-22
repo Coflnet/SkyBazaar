@@ -589,7 +589,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             //return await GetSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start).Take(count).ExecuteAsync();
             if (tableName == TABLE_NAME_SECONDS)
             {
-                return (await GetSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start)
+                return (await GetSplitSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start)
                     .OrderByDescending(d => d.TimeStamp).Take(count).ExecuteAsync().ConfigureAwait(false))
                     .ToList().Select(s => new AggregatedQuickStatus(s));
             }
