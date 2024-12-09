@@ -34,6 +34,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         private const string TABLE_NAME_SECONDS = "QuickStatusSeconds";
         private const string DEFAULT_ITEM_TAG = "STOCK_OF_STONKS";
         private static bool ranCreate;
+        public DateTime LastSuccessfullDB { get; private set; }
         private IConfiguration config;
         private ILogger<BazaarService> logger;
         ISession _session;
@@ -552,6 +553,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                         statement.SetRoutingKey(splitTable.Insert(status.First()).RoutingKey);
                         await session.ExecuteAsync((IStatement)statement);
                         insertCount.Inc();
+                        LastSuccessfullDB = DateTime.UtcNow;
                         return;
                     }
                     catch (Exception e)
@@ -589,9 +591,11 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             //return await GetSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start).Take(count).ExecuteAsync();
             if (tableName == TABLE_NAME_SECONDS)
             {
-                return (await GetSplitSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start)
+                var result = (await GetSplitSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start)
                     .OrderByDescending(d => d.TimeStamp).Take(count).ExecuteAsync().ConfigureAwait(false))
                     .ToList().Select(s => new AggregatedQuickStatus(s));
+                LastSuccessfullDB = DateTime.UtcNow;
+                return result;
             }
             if (tableName == TABLE_NAME_DAILY_NEW)
                 return await mapper.FetchAsync<AggregatedQuickStatus>("SELECT * FROM " + tableName

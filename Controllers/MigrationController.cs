@@ -19,12 +19,12 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
         [HttpGet]
         public IActionResult Ready()
         {
-            var migrationService = provider.GetService<MigrationService>();
-            if(migrationService == null)
+            var migrationService = provider.GetService<BazaarService>();
+            if(migrationService.LastSuccessfullDB > DateTime.UtcNow - TimeSpan.FromMinutes(5))
             {
                 return Ok("success");
             }
-            return migrationService.IsDone ? Ok("done") : StatusCode(503);
+            return StatusCode(503);
         }
     }
 }
