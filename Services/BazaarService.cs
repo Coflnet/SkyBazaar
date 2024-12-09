@@ -594,6 +594,10 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 var result = (await GetSplitSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start)
                     .OrderByDescending(d => d.TimeStamp).Take(count).ExecuteAsync().ConfigureAwait(false))
                     .ToList().Select(s => new AggregatedQuickStatus(s));
+                if(result.Count() == 0 && start > DateTime.UtcNow - TimeSpan.FromMinutes(5))
+                {
+                    return currentState.Where(c => c.ProductId == productId).Select(c => new AggregatedQuickStatus(c));
+                }
                 LastSuccessfullDB = DateTime.UtcNow;
                 return result;
             }
