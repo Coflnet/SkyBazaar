@@ -70,7 +70,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
         /// <param name="time"></param>
         /// <returns></returns>
         [Route("{itemId}/snapshot")]
-        [ResponseCache(Duration = 20, Location = ResponseCacheLocation.Any, NoStore = false, VaryByQueryKeys = new string[] { "time" })]
+        [ResponseCache(Duration = 10, Location = ResponseCacheLocation.Any, NoStore = false, VaryByQueryKeys = new string[] { "time" })]
         [HttpGet]
         public async Task<SkyBazaar.Models.StorageQuickStatus> GetClosestTo(string itemId, DateTime time = default)
         {
