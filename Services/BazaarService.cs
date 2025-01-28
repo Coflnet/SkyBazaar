@@ -194,6 +194,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     logger.LogError(e, "aggregation failed for minutes");
                 }
             }
+            logger.LogInformation("aggregated minutes with timestamp " + timestamp);
             if (IsTimestampWithinGroup(timestamp, TimeSpan.FromHours(2)))
                 return;
             Console.WriteLine("aggregating hours");
