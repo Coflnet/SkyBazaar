@@ -221,8 +221,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             foreach (var item in ids)
             {
                 var itemId = item;
-                var minTime = new DateTime(2025, 1, 19);
-                var maxTime = new DateTime(2025, 1, 22);
+                var minTime = new DateTime(2025, 1, 25);
+                var maxTime = new DateTime(2025, 1, 28);
                 var count = await GetDaysTable(session).Where(r => r.TimeStamp > minTime && r.TimeStamp < maxTime && r.ProductId == itemId).Count().ExecuteAsync();
                 if (count != 0)
                 {
@@ -239,7 +239,14 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 {
                     while (list.TryDequeue(out string itemId))
                     {
-                        await NewMethod(session, startDate, length, itemId);
+                        try
+                        {
+                            await NewMethod(session, startDate, length, itemId);
+                        }
+                        catch (Exception e)
+                        {
+                            logger.LogError(e, "aggregation failed");
+                        }
                     }
                     Console.WriteLine("Done aggregating, yay ");
 
@@ -594,7 +601,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 var result = (await GetSplitSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start)
                     .OrderByDescending(d => d.TimeStamp).Take(count).ExecuteAsync().ConfigureAwait(false))
                     .ToList().Select(s => new AggregatedQuickStatus(s));
-                if(result.Count() == 0 && start > DateTime.UtcNow - TimeSpan.FromMinutes(5))
+                if (result.Count() == 0 && start > DateTime.UtcNow - TimeSpan.FromMinutes(5))
                 {
                     return currentState.Where(c => c.ProductId == productId).Select(c => new AggregatedQuickStatus(c));
                 }
