@@ -179,20 +179,34 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             });
         }
 
-        private static async Task RunAgreggation(ISession session, DateTime timestamp)
+        private async Task RunAgreggation(ISession session, DateTime timestamp)
         {
             aggregateCount.Inc();
             var ids = await GetAllItemIds();
             foreach (var itemId in ids)
             {
-                await AggregateMinutes(session, timestamp - TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(10), itemId, timestamp + TimeSpan.FromSeconds(1));
+                try
+                {
+                    await AggregateMinutes(session, timestamp - TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(10), itemId, timestamp + TimeSpan.FromSeconds(1));
+                }
+                catch (Exception e)
+                {
+                    logger.LogError(e, "aggregation failed for minutes");
+                }
             }
             if (IsTimestampWithinGroup(timestamp, TimeSpan.FromHours(2)))
                 return;
             Console.WriteLine("aggregating hours");
             foreach (var itemId in ids)
             {
-                await AggregateHours(session, timestamp - TimeSpan.FromHours(24), itemId);
+                try
+                {
+                    await AggregateHours(session, timestamp - TimeSpan.FromHours(2), itemId);
+                }
+                catch (Exception e)
+                {
+                    logger.LogError(e, "aggregation failed for hours");
+                }
             }
 
             if (IsTimestampWithinGroup(timestamp, TimeSpan.FromDays(1)))
