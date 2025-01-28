@@ -213,7 +213,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             var minutes = GetMinutesTable(session);
 
             // minute loop
-            var startDate = new DateTime(2024, 8, 10);
+            var startDate = new DateTime(2025, 1, 17);
             var length = TimeSpan.FromHours(6);
             // stonks have always been on bazaar
             string[] ids = await GetAllItemIds();
