@@ -97,8 +97,6 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
             var entries = await service.GetStatus(itemId, start, end, 500);
             var result = entries.ToList();
 
-            Console.WriteLine(result.Count());
-
             return result.Select(a =>
             {
                 return new GraphResult()
