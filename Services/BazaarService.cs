@@ -202,7 +202,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             {
                 try
                 {
-                    await AggregateHours(session, timestamp - TimeSpan.FromHours(2), itemId);
+                    await AggregateHours(session, timestamp - TimeSpan.FromHours(4), itemId);
                 }
                 catch (Exception e)
                 {
