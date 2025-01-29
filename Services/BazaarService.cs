@@ -202,7 +202,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             {
                 try
                 {
-                    await AggregateHours(session, timestamp - TimeSpan.FromHours(4), itemId);
+                    await AggregateHours(session, timestamp - TimeSpan.FromHours(6), itemId);
                 }
                 catch (Exception e)
                 {
@@ -310,7 +310,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
         private static async Task AggregateHours(ISession session, DateTime startDate, string itemId)
         {
-            await AggregateMinutesData(session, startDate, TimeSpan.FromDays(1), itemId, GetSplitHoursTable(session), (a, b, c, d) =>
+            await AggregateMinutesData(session, startDate, TimeSpan.FromHours(4), itemId, GetSplitHoursTable(session), (a, b, c, d) =>
             {
                 return CreateBlockAggregated(a, b, c, d, GetSplitMinutesTable(a));
             }, TimeSpan.FromHours(2));
