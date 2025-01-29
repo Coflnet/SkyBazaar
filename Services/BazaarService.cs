@@ -369,7 +369,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             }
             if (length < TimeSpan.FromMinutes(10) && Random.Shared.NextDouble() > 0.1)
                 return;
-            Console.WriteLine($"checked {start} {itemId} {addCount}\t{skipped}");
+            Console.WriteLine($"checked {start} {minTable.Name} {itemId} {addCount}\t{skipped}");
         }
 
         private static async Task<SplitAggregatedQuickStatus> CreateBlock(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd)
