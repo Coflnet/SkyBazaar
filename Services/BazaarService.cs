@@ -236,8 +236,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             foreach (var item in ids)
             {
                 var itemId = item;
-                var minTime = new DateTime(2025, 1, 25);
-                var maxTime = new DateTime(2025, 1, 28);
+                var minTime = new DateTime(2025, 1, 24);
+                var maxTime = new DateTime(2025, 1, 26);
                 var count = await GetDaysTable(session).Where(r => r.TimeStamp > minTime && r.TimeStamp < maxTime && r.ProductId == itemId).Count().ExecuteAsync();
                 if (count != 0)
                 {
