@@ -70,8 +70,11 @@ public class OrderBookService
             // remove userId to prevent spamming
             outbid.UserId = null;
         }
-        if (order.UserId != null) // only save if it's a real user
+        if (order.UserId != null)
+        {// only save if it's a real user
             await InsertToDb(order);
+            logger.LogInformation($"order book: User {order.UserId} added order for {order.ItemId} {order.Amount}x {order.PricePerUnit} {(order.IsSell ? "sell" : "buy")} at {order.Timestamp}");
+        }
     }
 
     protected virtual async Task InsertToDb(OrderEntry order)
