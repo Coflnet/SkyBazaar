@@ -56,12 +56,13 @@ public class OrderBookService
             var differencePrefix = order.IsSell ? "-" : "+";
             var names = await itemsApi.ItemNamesGetAsync();
             var name = names?.Where(n => n.Tag == order.ItemId).FirstOrDefault()?.Name;
+            var differenceAmount = Math.Round(Math.Abs(outbid.PricePerUnit - order.PricePerUnit), 1);
 
             await messageApi.MessageSendUserIdPostAsync(outbid.UserId, new()
             {
                 Summary = "You were " + action,
                 //  by an order of 10000x at 8520.1 per unit (+101.5).
-                Message = $"Your {kind}-order for {outbid.Amount}x {name ?? "item"} has been {action} by an order of {order.Amount}x at {order.PricePerUnit} per unit ({differencePrefix}{outbid.PricePerUnit - order.PricePerUnit}).",
+                Message = $"Your {kind}-order for {outbid.Amount}x {name ?? "item"} has been {action} by an order of {order.Amount}x at {Math.Round(order.PricePerUnit, 1)} per unit ({differencePrefix}{differenceAmount}).",
                 Reference = (outbid.Amount + outbid.ItemId + outbid.PricePerUnit + outbid.Timestamp.Ticks).Truncate(32),
                 SourceType = "bazaar",
                 SourceSubId = "outbid"
