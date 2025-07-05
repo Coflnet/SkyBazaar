@@ -191,6 +191,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 }
                 catch (Exception e)
                 {
+                    if (e.Message.Contains("Unrecognized name quaterid"))
+                        await Task.Delay(10_000);
                     logger.LogError(e, "aggregation failed for minutes");
                 }
             }
@@ -445,8 +447,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             {
                 // set timewindow compaction to 14 days
                 await session.ExecuteAsync(new SimpleStatement($"ALTER TABLE {TABLE_NAME_SECONDS} WITH compaction = {{'class': 'TimeWindowCompactionStrategy', 'compaction_window_unit': 'DAYS', 'compaction_window_size': '2'}}"));
-                // set default TTL to 14 days
-                await session.ExecuteAsync(new SimpleStatement($"ALTER TABLE {TABLE_NAME_SECONDS} WITH default_time_to_live = 1209600"));
+                // set default TTL to 8 days
+                await session.ExecuteAsync(new SimpleStatement($"ALTER TABLE {TABLE_NAME_SECONDS} WITH default_time_to_live = 691200"));
                 logger.LogInformation("Set compaction strategy");
             }
             catch (Exception e)
