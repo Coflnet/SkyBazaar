@@ -320,7 +320,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 {
                     var blockCopy = new SplitAggregatedQuickStatus(block);
                     // round timestamp to make the compaction collide if multiple are inserted
-                    block.TimeStamp = block.TimeStamp.RoundDown(TimeSpan.FromHours(1));
+                    block.TimeStamp = block.TimeStamp.RoundDown(TimeSpan.FromHours(2));
                     await RecentHoursTable(session).Insert(block).ExecuteAsync();
                 }
                 catch (Exception e)
@@ -697,6 +697,29 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             if (length < TimeSpan.FromDays(7.01f))
                 return TABLE_NAME_HOURLY; // 1 per 2 hours
             return TABLE_NAME_DAILY; // one daily
+        }
+
+        internal async Task<IEnumerable<ItemPriceMovement>> GetMovement(int hours, bool usebuyOrders)
+        {
+            var table = RecentHoursTable(await GetSession());
+            var start = (DateTime.UtcNow - TimeSpan.FromHours(hours)).RoundDown(TimeSpan.FromHours(2));
+            var prices = (await table.Where(t => t.TimeStamp == start).ExecuteAsync()).ToList();
+            var currentLookup = currentState.ToDictionary(c => c.ProductId, c => c);
+            return prices.Select(p =>
+            {
+                var item = new ItemPriceMovement
+                {
+                    ItemId = p.ProductId,
+                    PreviousPrice = p.BuyPrice,
+                    CurrentPrice = currentLookup[p.ProductId].BuyPrice
+                };
+                if (usebuyOrders)
+                {
+                    item.PreviousPrice = p.SellPrice;
+                    item.CurrentPrice = currentLookup[p.ProductId].SellPrice;
+                }
+                return item;
+            });
         }
     }
 }

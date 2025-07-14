@@ -129,5 +129,14 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
             var tags = await itemsApi.ItemsBazaarTagsGetAsync();
             return await service.GetCurrentPrices(tags);
         }
+
+        [Route("movement")]
+        [ResponseCache(Duration = 20, Location = ResponseCacheLocation.Any, NoStore = false, VaryByQueryKeys = new string[] { "hours", "usebuyOrders" })]
+        [HttpGet]
+        public async Task<IEnumerable<ItemPriceMovement>> GetMovement(int hours = 24, bool usebuyOrders = false)
+        {
+            return await service.GetMovement(hours, usebuyOrders);
+        }
+
     }
 }
