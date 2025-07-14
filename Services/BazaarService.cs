@@ -30,7 +30,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         private const string TABLE_NAME_DAILY_NEW = "QuickStatusDaly";
         private const string TABLE_NAME_DAILY = "QuickStatusDaly";
         private const string TABLE_NAME_HOURLY = "QuickStatusHourly";
-        private const string TABLE_NAME_RECENT_HOURLY = "QuickStatusRecent2";
+        private const string TABLE_NAME_RECENT_HOURLY = "QuickStatusRecent3";
         private const string TABLE_NAME_MINUTES = "QuickStatusMin";
         private const string TABLE_NAME_SECONDS = "QuickStatusSeconds";
         private const string DEFAULT_ITEM_TAG = "STOCK_OF_STONKS";
@@ -537,7 +537,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         public static Table<AggregatedQuickStatus> RecentHoursTable(ISession session)
         {
             var mapping = new MappingConfiguration().Define(
-                new Map<SplitAggregatedQuickStatus>()
+                new Map<AggregatedQuickStatus>()
                     .PartitionKey(f => f.TimeStamp)
                     .ClusteringKey(f => f.ProductId)
                     .Column(f => f.BuyOrders, cm => cm.Ignore())
