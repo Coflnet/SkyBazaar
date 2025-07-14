@@ -30,6 +30,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         private const string TABLE_NAME_DAILY_NEW = "QuickStatusDaly";
         private const string TABLE_NAME_DAILY = "QuickStatusDaly";
         private const string TABLE_NAME_HOURLY = "QuickStatusHourly";
+        private const string TABLE_NAME_RECENT_HOURLY = "QuickStatusRecent";
         private const string TABLE_NAME_MINUTES = "QuickStatusMin";
         private const string TABLE_NAME_SECONDS = "QuickStatusSeconds";
         private const string DEFAULT_ITEM_TAG = "STOCK_OF_STONKS";
@@ -312,9 +313,21 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
         private static async Task AggregateHours(ISession session, DateTime startDate, string itemId)
         {
-            await AggregateMinutesData(session, startDate, TimeSpan.FromHours(4), itemId, GetSplitHoursTable(session), (a, b, c, d) =>
+            await AggregateMinutesData(session, startDate, TimeSpan.FromHours(4), itemId, GetSplitHoursTable(session), async (a, b, c, d) =>
             {
-                return CreateBlockAggregated(a, b, c, d, GetSplitMinutesTable(a));
+                var block = await CreateBlockAggregated(a, b, c, d, GetSplitMinutesTable(a));
+                try
+                {
+                    var blockCopy = new SplitAggregatedQuickStatus(block);
+                    // round timestamp to make the compaction collide if multiple are inserted
+                    block.TimeStamp = block.TimeStamp.RoundDown(TimeSpan.FromHours(1));
+                    await RecentHoursTable(session).Insert(block).ExecuteAsync();
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine("Failed to insert recent hours " + e);
+                }
+                return block;
             }, TimeSpan.FromHours(2));
         }
 
@@ -442,14 +455,40 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             await hours.CreateIfNotExistsAsync();
             var daily = GetNewDaysTable(session);
             await daily.CreateIfNotExistsAsync();
+            var recentHours = RecentHoursTable(session);
+            await recentHours.CreateIfNotExistsAsync();
 
             try
             {
-                // set timewindow compaction to 14 days
-                await session.ExecuteAsync(new SimpleStatement($"ALTER TABLE {TABLE_NAME_SECONDS} WITH compaction = {{'class': 'TimeWindowCompactionStrategy', 'compaction_window_unit': 'DAYS', 'compaction_window_size': '2'}}"));
-                // set default TTL to 8 days
-                await session.ExecuteAsync(new SimpleStatement($"ALTER TABLE {TABLE_NAME_SECONDS} WITH default_time_to_live = 691200"));
-                logger.LogInformation("Set compaction strategy");
+                // Query current compaction strategy for recent hours table
+                var compactionResult = await session.ExecuteAsync(new SimpleStatement($"SELECT compaction, default_time_to_live FROM system_schema.tables WHERE keyspace_name = '{session.Keyspace}' AND table_name = '{TABLE_NAME_RECENT_HOURLY.ToLower()}';"));
+                var row = compactionResult.FirstOrDefault();
+                var keeptime = 1209600 / 2;
+                bool needsUpdate = true;
+                if (row != null)
+                {
+                    var compaction = row.GetValue<IDictionary<string, string>>("compaction");
+                    var ttl = row.GetValue<int?>("default_time_to_live");
+                    if (compaction != null && compaction.TryGetValue("class", out var compactionClass))
+                    {
+                        if (compactionClass.Contains("TimeWindowCompactionStrategy") && ttl == keeptime)
+                        {
+                            needsUpdate = false;
+                        }
+                    }
+                }
+                if (needsUpdate)
+                {
+                    await session.ExecuteAsync(new SimpleStatement(
+                        $"ALTER TABLE {TABLE_NAME_RECENT_HOURLY} WITH compaction = {{'class': 'TimeWindowCompactionStrategy', 'compaction_window_size': '1', 'compaction_window_unit': 'DAYS'}} AND default_time_to_live = {keeptime};"));
+                    await session.ExecuteAsync(new SimpleStatement(
+                        $"ALTER TABLE {TABLE_NAME_SECONDS} WITH compaction = {{'class': 'TimeWindowCompactionStrategy', 'compaction_window_size': '1', 'compaction_window_unit': 'DAYS'}} AND default_time_to_live = 1209600;"));
+                    logger.LogInformation("Set compaction strategy for recent hours table");
+                }
+                else
+                {
+                    logger.LogInformation("Recent hours table already has the correct compaction strategy and TTL.");
+                }
             }
             catch (Exception e)
             {
@@ -489,9 +528,23 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     .ClusteringKey(f => f.TimeStamp)
                     .Column(f => f.BuyOrders, cm => cm.Ignore())
                     .Column(f => f.SellOrders, cm => cm.Ignore())
-                    .TableName(TABLE_NAME_SECONDS)
+                    .TableName(TABLE_NAME_HOURLY)
             );
             return new Table<SplitAggregatedQuickStatus>(session, mapping, TABLE_NAME_HOURLY);
+        }
+
+
+        public static Table<AggregatedQuickStatus> RecentHoursTable(ISession session)
+        {
+            var mapping = new MappingConfiguration().Define(
+                new Map<SplitAggregatedQuickStatus>()
+                    .PartitionKey(f => f.TimeStamp)
+                    .ClusteringKey(f => f.ProductId)
+                    .Column(f => f.BuyOrders, cm => cm.Ignore())
+                    .Column(f => f.SellOrders, cm => cm.Ignore())
+                    .TableName(TABLE_NAME_RECENT_HOURLY)
+            );
+            return new Table<AggregatedQuickStatus>(session, mapping, TABLE_NAME_RECENT_HOURLY);
         }
         public static Table<SplitAggregatedQuickStatus> GetSplitMinutesTable(ISession session)
         {
@@ -501,7 +554,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     .ClusteringKey(f => f.TimeStamp)
                     .Column(f => f.BuyOrders, cm => cm.Ignore())
                     .Column(f => f.SellOrders, cm => cm.Ignore())
-                    .TableName(TABLE_NAME_SECONDS)
+                    .TableName(TABLE_NAME_MINUTES)
             );
             return new Table<SplitAggregatedQuickStatus>(session, mapping, TABLE_NAME_MINUTES);
         }
