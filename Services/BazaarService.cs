@@ -318,6 +318,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 var block = await CreateBlockAggregated(a, b, c, d, GetSplitMinutesTable(a));
                 try
                 {
+                    if(block == null)
+                        return null;
                     var blockCopy = new SplitAggregatedQuickStatus(block);
                     // round timestamp to make the compaction collide if multiple are inserted
                     block.TimeStamp = block.TimeStamp.RoundDown(TimeSpan.FromHours(2));
@@ -702,8 +704,9 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         internal async Task<IEnumerable<ItemPriceMovement>> GetMovement(int hours, bool usebuyOrders)
         {
             var table = RecentHoursTable(await GetSession());
-            var start = (DateTime.UtcNow - TimeSpan.FromHours(hours)).RoundDown(TimeSpan.FromHours(2));
-            var prices = (await table.Where(t => t.TimeStamp == start).ExecuteAsync()).ToList();
+            var start = (DateTime.UtcNow - TimeSpan.FromHours(hours)).RoundDown(TimeSpan.FromHours(3));
+            var prices = (await table.Where(t => t.TimeStamp == start).ExecuteAsync()).ToList()
+                .GroupBy(p => p.ProductId).Select(g => g.FirstOrDefault()); ;
             var currentLookup = currentState.ToDictionary(c => c.ProductId, c => c);
             return prices.Select(p =>
             {
