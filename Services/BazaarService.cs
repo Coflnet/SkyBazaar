@@ -707,7 +707,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             var start = (DateTime.UtcNow - TimeSpan.FromHours(hours)).RoundDown(TimeSpan.FromHours(3));
             var prices = (await table.Where(t => t.TimeStamp == start).ExecuteAsync()).ToList()
                 .GroupBy(p => p.ProductId).Select(g => g.FirstOrDefault()); ;
-            var currentLookup = currentState.ToDictionary(c => c.ProductId, c => c);
+            var currentLookup = currentState.GroupBy(c=>c.ProductId).Select(g=>g.First()).ToDictionary(c => c.ProductId, c => c);
             return prices.Select(p =>
             {
                 var item = new ItemPriceMovement
