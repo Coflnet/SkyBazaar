@@ -704,11 +704,18 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         internal async Task<IEnumerable<ItemPriceMovement>> GetMovement(int hours, bool usebuyOrders)
         {
             var table = RecentHoursTable(await GetSession());
-            var start = (DateTime.UtcNow - TimeSpan.FromHours(hours)).RoundDown(TimeSpan.FromHours(3));
-            var prices = (await table.Where(t => t.TimeStamp == start).ExecuteAsync()).ToList()
-                .GroupBy(p => p.ProductId).Select(g => g.FirstOrDefault()); ;
+            var start = (DateTime.UtcNow - TimeSpan.FromHours(hours)).RoundDown(TimeSpan.FromHours(2)); // hourly view is saved every 2 hours
+            var prices = (await table.Where(t => t.TimeStamp == start).ExecuteAsync()).ToList();
+            if (prices.Count() == 0)
+            {
+                // try with more recent data
+                start = (DateTime.UtcNow - TimeSpan.FromHours(hours - 2)).RoundDown(TimeSpan.FromHours(2));
+                prices = (await table.Where(t => t.TimeStamp == start).ExecuteAsync()).ToList();
+            }
             var currentLookup = currentState.GroupBy(c=>c.ProductId).Select(g=>g.First()).ToDictionary(c => c.ProductId, c => c);
-            return prices.Select(p =>
+            return prices
+                .GroupBy(p => p.ProductId).Select(g => g.FirstOrDefault())
+                .Select(p =>
             {
                 var item = new ItemPriceMovement
                 {
