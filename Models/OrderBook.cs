@@ -28,7 +28,7 @@ public class OrderBook
         {
             foreach (var item in Sell.ToList().OrderByDescending(o => o.PricePerUnit).Take(5).ToList())
             {
-                if (item.PricePerUnit > entry.PricePerUnit && item.UserId != null)
+                if (Math.Round(item.PricePerUnit, 1) > Math.Round(entry.PricePerUnit, 1) && item.UserId != null)
                 {
                     outbid = item;
                     return true;
@@ -39,7 +39,7 @@ public class OrderBook
         {
             foreach (var item in Buy.ToList().OrderByDescending(o => o.PricePerUnit).Take(5).ToList())
             {
-                if (item.PricePerUnit < entry.PricePerUnit && item.UserId != null)
+                if (Math.Round(item.PricePerUnit, 1) < Math.Round(entry.PricePerUnit, 1) && item.UserId != null)
                 {
                     outbid = item;
                     return true;
