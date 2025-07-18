@@ -9,4 +9,5 @@ public class ItemPriceMovement
     public string ItemId { get; set; }
     public double PreviousPrice { get; set; }
     public double CurrentPrice { get; set; }
+    public long Volume { get; set; }
 }

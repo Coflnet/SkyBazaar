@@ -1,4 +1,4 @@
-VERSION=0.5.0
+VERSION=0.5.1
 PACKAGE_NAME=Coflnet.Sky.Bazaar.Client
 
 docker run --rm -v "${PWD}:/local" --network host -u $(id -u ${USER}):$(id -g ${USER})  openapitools/openapi-generator-cli generate \

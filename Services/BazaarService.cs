@@ -721,12 +721,14 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 {
                     ItemId = p.ProductId,
                     PreviousPrice = p.BuyPrice,
-                    CurrentPrice = currentLookup[p.ProductId].BuyPrice
+                    CurrentPrice = currentLookup[p.ProductId].BuyPrice,
+                    Volume = currentLookup[p.ProductId].BuyVolume,
                 };
                 if (usebuyOrders)
                 {
                     item.PreviousPrice = p.SellPrice;
                     item.CurrentPrice = currentLookup[p.ProductId].SellPrice;
+                    item.Volume = currentLookup[p.ProductId].SellVolume;
                 }
                 return item;
             });
