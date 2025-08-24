@@ -17,3 +17,4 @@ sed -i '34i    <None Include="../../../../README.md" Pack="true" PackagePath="\"
 dotnet pack
 cp src/$PACKAGE_NAME/bin/Release/$PACKAGE_NAME.*.nupkg ..
 dotnet nuget push ../$PACKAGE_NAME.$VERSION.nupkg --api-key $NUGET_API_KEY --source "nuget.org" --skip-duplicate
+rm *.sln
