@@ -51,6 +51,10 @@ public class OrderBookService
 
         if (isOutBid && outbid.UserId != null)
         {
+            var gray = "§7";
+            var green = "§a";
+            var red = "§c";
+            var aqua = "§b";
             var kind = order.IsSell ? "sell" : "buy";
             var action = order.IsSell ? "undercut" : "outbid";
             var differencePrefix = order.IsSell ? "-" : "+";
@@ -60,9 +64,8 @@ public class OrderBookService
 
             await messageApi.MessageSendUserIdPostAsync(outbid.UserId, new()
             {
-                Summary = "You were " + action,
-                //  by an order of 10000x at 8520.1 per unit (+101.5).
-                Message = $"Your {kind}-order for {outbid.Amount}x {name ?? "item"} has been {action} by an order of {order.Amount}x at {Math.Round(order.PricePerUnit, 1)} per unit ({differencePrefix}{differenceAmount}).",
+                Summary = $"You were {action}",
+                Message = $"{gray}Your {green}{kind}{gray}-order for {aqua}{outbid.Amount}x {name ?? "item"}{gray} has been {red}{action}{gray} by an order of {aqua}{order.Amount}x{gray} at {green}{Math.Round(order.PricePerUnit, 1)}{gray} per unit ({differencePrefix}{differenceAmount}).",
                 Reference = (outbid.Amount + outbid.ItemId + outbid.PricePerUnit + outbid.Timestamp.Ticks).Truncate(32),
                 SourceType = "bazaar",
                 SourceSubId = "outbid"
