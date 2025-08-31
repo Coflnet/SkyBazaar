@@ -60,31 +60,31 @@ namespace Coflnet.Sky.SkyBazaar.Models
         [Ignore]
         [IgnoreMember]
         [JsonProperty("buyOrders")]
-        public IEnumerable<BuyOrder> BuyOrders
+        public IEnumerable<Order> BuyOrders
         {
             get
             {
-                return MessagePack.MessagePackSerializer.Deserialize<IEnumerable<BuyOrder>>(SerialisedBuyOrders);
+                return MessagePackSerializer.Deserialize<IEnumerable<BuyOrder>>(SerialisedBuyOrders);
             }
             set
             {
                 if (SerialisedBuyOrders == null && value != null)
-                    SerialisedBuyOrders = MessagePack.MessagePackSerializer.Serialize<IEnumerable<BuyOrder>>(value);
+                    SerialisedBuyOrders = MessagePackSerializer.Serialize(value);
             }
         }
         [Ignore]
         [IgnoreMember]
         [JsonProperty("sellOrders")]
-        public IEnumerable<SellOrder> SellOrders
+        public IEnumerable<Order> SellOrders
         {
             get
             {
-                return MessagePack.MessagePackSerializer.Deserialize<IEnumerable<SellOrder>>(SerialisedSellOrders);
+                return MessagePackSerializer.Deserialize<IEnumerable<SellOrder>>(SerialisedSellOrders);
             }
             set
             {
                 if (SerialisedSellOrders == null && value != null)
-                    SerialisedSellOrders = MessagePack.MessagePackSerializer.Serialize(value);
+                    SerialisedSellOrders = MessagePackSerializer.Serialize(value);
             }
         }
 
