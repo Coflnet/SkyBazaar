@@ -155,6 +155,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             {
                 ProductId = s.ProductId,
                 BuyPrice = s.BuyPrice,
+                DailyBuyVolume = (int)(s.BuyMovingWeek / 7),
+                DailySellVolume = (int)(s.SellMovingWeek / 7),
                 SellPrice = s.SellPrice
             });
         }
