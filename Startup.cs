@@ -62,6 +62,7 @@ namespace Coflnet.Sky.SkyAuctionTracker
             // services.AddJaeger(Configuration);
             services.AddSingleton<BazaarService>();
             services.AddResponseCaching();
+            services.AddResponseCompression();
             services.AddMemoryCache();
             services.AddSingleton(d => ConnectionMultiplexer.Connect(Configuration["SETTINGS_REDIS_HOST"]));
             services.AddSingleton<OrderBookService>();
@@ -95,6 +96,7 @@ namespace Coflnet.Sky.SkyAuctionTracker
             });
 
             app.UseResponseCaching();
+            app.UseResponseCompression();
 
             app.UseRouting();
 
