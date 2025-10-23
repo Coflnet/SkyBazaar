@@ -15,6 +15,10 @@ public class OrderEntry
     /// </summary>
     public bool IsVerfified { get; set; }
     public int Filled { get; set; }
+    /// <summary>
+    /// Has the user been notified about being outbid/undercut for this order?
+    /// </summary>
+    public bool HasBeenNotified { get; set; }
 
     public override bool Equals(object obj)
     {

@@ -46,39 +46,59 @@ public class OrderBookService
         if (!order.IsSell)
             side = orderBook.Buy;
 
-        var isOutBid = orderBook.TryGetOutbid(order, out var outbid);
+        // Get all orders that will be outbid by this new order
+        var outbidOrders = orderBook.GetAllOutbidOrders(order);
         side.Add(order);
 
-        if (isOutBid && outbid.UserId != null)
+        // Notify all outbid users
+        foreach (var outbid in outbidOrders)
         {
-            var gray = "§7";
-            var green = "§a";
-            var red = "§c";
-            var aqua = "§b";
-            var kind = order.IsSell ? "sell" : "buy";
-            var action = order.IsSell ? "undercut" : "outbid";
-            var differencePrefix = order.IsSell ? "-" : "+";
-            var names = await itemsApi.ItemNamesGetAsync();
-            var name = names?.Where(n => n.Tag == order.ItemId).FirstOrDefault()?.Name;
-            var differenceAmount = Math.Round(Math.Abs(outbid.PricePerUnit - order.PricePerUnit), 1);
-
-            await messageApi.MessageSendUserIdPostAsync(outbid.UserId, new()
-            {
-                Summary = $"You were {action}",
-                Message = $"{gray}Your {green}{kind}{gray}-order for {aqua}{outbid.Amount}x {name ?? "item"}{gray} has been {red}{action}{gray} by an order of {aqua}{order.Amount}x{gray} at {green}{Math.Round(order.PricePerUnit, 1)}{gray} per unit ({differencePrefix}{differenceAmount}).",
-                Reference = (outbid.Amount + outbid.ItemId + outbid.PricePerUnit + outbid.Timestamp.Ticks).Truncate(32),
-                SourceType = "bazaar",
-                SourceSubId = "outbid"
-            });
-            logger.LogInformation($"order book: User {outbid.UserId} was {action} by {order.UserId} for {order.ItemId} {order.Amount}x {order.PricePerUnit}");
-            // remove userId to prevent spamming
-            outbid.UserId = null;
+            await SendOutbidNotification(order, outbid);
+            // Mark as notified to prevent duplicate notifications
+            outbid.HasBeenNotified = true;
+            await UpdateInDb(outbid);
         }
+
         if (order.UserId != null)
         {// only save if it's a real user
             await InsertToDb(order);
             logger.LogInformation($"order book: User {order.UserId} added order for {order.ItemId} {order.Amount}x {order.PricePerUnit} {(order.IsSell ? "sell" : "buy")} at {order.Timestamp}");
         }
+    }
+
+    private async Task SendOutbidNotification(OrderEntry newOrder, OrderEntry outbid)
+    {
+        var gray = "§7";
+        var green = "§a";
+        var red = "§c";
+        var aqua = "§b";
+        var kind = newOrder.IsSell ? "sell" : "buy";
+        var action = newOrder.IsSell ? "undercut" : "outbid";
+        var differencePrefix = newOrder.IsSell ? "-" : "+";
+        var names = await itemsApi.ItemNamesGetAsync();
+        var name = names?.Where(n => n.Tag == newOrder.ItemId).FirstOrDefault()?.Name;
+        var differenceAmount = Math.Round(Math.Abs(outbid.PricePerUnit - newOrder.PricePerUnit), 1);
+
+        await messageApi.MessageSendUserIdPostAsync(outbid.UserId, new()
+        {
+            Summary = $"You were {action}",
+            Message = $"{gray}Your {green}{kind}{gray}-order for {aqua}{outbid.Amount}x {name ?? "item"}{gray} has been {red}{action}{gray} by an order of {aqua}{newOrder.Amount}x{gray} at {green}{Math.Round(newOrder.PricePerUnit, 1)}{gray} per unit ({differencePrefix}{differenceAmount}).",
+            Reference = (outbid.Amount + outbid.ItemId + outbid.PricePerUnit + outbid.Timestamp.Ticks).Truncate(32),
+            SourceType = "bazaar",
+            SourceSubId = "outbid"
+        });
+        logger.LogInformation($"order book: User {outbid.UserId} was {action} by {newOrder.UserId} for {newOrder.ItemId} {newOrder.Amount}x {newOrder.PricePerUnit}");
+    }
+
+    protected virtual async Task UpdateInDb(OrderEntry order)
+    {
+        if (order.UserId == null)
+            return;
+        // Update the order in the database to mark it as notified
+        await orderBookTable.Where(o => o.ItemId == order.ItemId && o.Timestamp == order.Timestamp && o.UserId == order.UserId)
+            .Select(o => new OrderEntry { HasBeenNotified = true })
+            .Update()
+            .ExecuteAsync();
     }
 
     protected virtual async Task InsertToDb(OrderEntry order)
@@ -180,6 +200,44 @@ public class OrderBookService
         await orderBookTable.Where(o => o.ItemId == item.ItemId && o.Timestamp == item.Timestamp && o.UserId == item.UserId).Delete().ExecuteAsync();
     }
 
+    /// <summary>
+    /// Marks old orders as notified on restart to prevent spam.
+    /// Only the top order (best price) per item can still be notified.
+    /// </summary>
+    private void MarkOldOrdersAsNotified()
+    {
+        foreach (var orderBook in cache.Values)
+        {
+            // For sell orders, keep only the lowest price order unmarked
+            if (orderBook.Sell.Any(o => o.UserId != null))
+            {
+                var topSellOrder = orderBook.Sell
+                    .Where(o => o.UserId != null)
+                    .OrderBy(o => o.PricePerUnit)
+                    .FirstOrDefault();
+                
+                foreach (var order in orderBook.Sell.Where(o => o.UserId != null && o != topSellOrder))
+                {
+                    order.HasBeenNotified = true;
+                }
+            }
+
+            // For buy orders, keep only the highest price order unmarked
+            if (orderBook.Buy.Any(o => o.UserId != null))
+            {
+                var topBuyOrder = orderBook.Buy
+                    .Where(o => o.UserId != null)
+                    .OrderByDescending(o => o.PricePerUnit)
+                    .FirstOrDefault();
+                
+                foreach (var order in orderBook.Buy.Where(o => o.UserId != null && o != topBuyOrder))
+                {
+                    order.HasBeenNotified = true;
+                }
+            }
+        }
+    }
+
     internal async Task Load()
     {
         var mapping = new MappingConfiguration()
@@ -195,6 +253,7 @@ public class OrderBookService
                 .Column(o => o.Timestamp, cm => cm.WithName("timestamp"))
                 .Column(o => o.UserId, cm => cm.WithName("user_id").WithSecondaryIndex())
                 .Column(o => o.ItemId, cm => cm.WithName("item_id"))
+                .Column(o => o.HasBeenNotified, cm => cm.WithName("has_been_notified"))
             );
         ArgumentNullException.ThrowIfNull(sessionContainer.Session);
         orderBookTable = new Table<OrderEntry>(sessionContainer.Session, mapping);
@@ -217,6 +276,10 @@ public class OrderBookService
 
                     side.Add(order);
                 }
+                
+                // After loading all orders, mark old orders as notified except for the top order
+                MarkOldOrdersAsNotified();
+                
                 return;
             }
             catch (System.Exception e)

@@ -66,6 +66,8 @@ namespace Coflnet.Sky.SkyAuctionTracker
             services.AddMemoryCache();
             services.AddSingleton(d => ConnectionMultiplexer.Connect(Configuration["SETTINGS_REDIS_HOST"]));
             services.AddSingleton<OrderBookService>();
+            // Run a small migration on startup to ensure the new column exists
+            services.AddHostedService<Services.Migrations.AddHasBeenNotifiedMigration>();
             services.AddSingleton<ISessionContainer>(d => d.GetRequiredService<BazaarService>());
             services.AddSingleton<IItemsApi, ItemsApi>(d =>
             {

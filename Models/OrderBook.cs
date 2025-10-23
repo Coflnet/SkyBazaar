@@ -49,6 +49,41 @@ public class OrderBook
         return false;
     }
 
+    /// <summary>
+    /// Returns all orders that are outbid by the new entry and haven't been notified yet
+    /// For sell orders: returns orders with higher price (worse)
+    /// For buy orders: returns orders with lower price (worse)
+    /// </summary>
+    /// <param name="entry">The new order being added</param>
+    /// <returns>List of orders that have been outbid and should be notified</returns>
+    public List<OrderEntry> GetAllOutbidOrders(OrderEntry entry)
+    {
+        var outbidOrders = new List<OrderEntry>();
+        
+        if (entry.IsSell)
+        {
+            // For sell orders, find all orders with higher price that haven't been notified
+            outbidOrders = Sell
+                .Where(o => o.UserId != null 
+                    && !o.HasBeenNotified 
+                    && Math.Round(o.PricePerUnit, 1) > Math.Round(entry.PricePerUnit, 1))
+                .OrderBy(o => o.PricePerUnit) // Start with closest to new price
+                .ToList();
+        }
+        else
+        {
+            // For buy orders, find all orders with lower price that haven't been notified
+            outbidOrders = Buy
+                .Where(o => o.UserId != null 
+                    && !o.HasBeenNotified 
+                    && Math.Round(o.PricePerUnit, 1) < Math.Round(entry.PricePerUnit, 1))
+                .OrderByDescending(o => o.PricePerUnit) // Start with closest to new price
+                .ToList();
+        }
+        
+        return outbidOrders;
+    }
+
     internal bool Remove(OrderEntry order)
     {
         var side = order.IsSell ? this.Sell : this.Buy;
