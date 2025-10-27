@@ -79,10 +79,12 @@ public class OrderBookService
         var name = names?.Where(n => n.Tag == newOrder.ItemId).FirstOrDefault()?.Name;
         var differenceAmount = Math.Round(Math.Abs(outbid.PricePerUnit - newOrder.PricePerUnit), 1);
 
+        var undercutBySelf = outbid.UserId == newOrder.UserId;
         await messageApi.MessageSendUserIdPostAsync(outbid.UserId, new()
         {
             Summary = $"You were {action}",
-            Message = $"{gray}Your {green}{kind}{gray}-order for {aqua}{outbid.Amount}x {name ?? "item"}{gray} has been {red}{action}{gray} by an order of {aqua}{newOrder.Amount}x{gray} at {green}{Math.Round(newOrder.PricePerUnit, 1)}{gray} per unit ({differencePrefix}{differenceAmount}).",
+            Message = $"{gray}Your {green}{kind}{gray}-order for {aqua}{outbid.Amount}x {name ?? "item"}{gray} has been {red}{action}{gray} by an order of {aqua}{newOrder.Amount}x{gray} "
+             +$"at {green}{Math.Round(newOrder.PricePerUnit, 1)}{gray} per unit ({differencePrefix}{differenceAmount}).{(undercutBySelf ? " You undercut your own order!" : string.Empty)}",
             Reference = (outbid.Amount + outbid.ItemId + outbid.PricePerUnit + outbid.Timestamp.Ticks).Truncate(32),
             SourceType = "bazaar",
             SourceSubId = "outbid"
