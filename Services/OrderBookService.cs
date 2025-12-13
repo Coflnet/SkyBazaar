@@ -83,9 +83,9 @@ public class OrderBookService
         await messageApi.MessageSendUserIdPostAsync(outbid.UserId, new()
         {
             Summary = $"You were {action}",
-            Message = $"{gray}Your {green}{kind}{gray}-order for {aqua}{outbid.Amount}x {name ?? "item"}{gray} has been {red}{action}{gray} by an order of {aqua}{newOrder.Amount}x{gray} "
-             +$"at {green}{Math.Round(newOrder.PricePerUnit, 1)}{gray} per unit ({differencePrefix}{differenceAmount}).{(undercutBySelf ? " You undercut your own order!" : string.Empty)}",
-            Reference = (outbid.Amount + outbid.ItemId + outbid.PricePerUnit + outbid.Timestamp.Ticks).Truncate(32),
+            Message = $"{gray}Your {green}{kind}{gray}-order for {aqua}{outbid.Amount:N0}x {name ?? "item"}{gray} has been {red}{action}{gray} by an order of {aqua}{newOrder.Amount:N0}x{gray} "
+             + $"at {green}{Math.Round(newOrder.PricePerUnit, 1):N1}{gray} per unit ({differencePrefix}{differenceAmount.ToString("N1")}).{(undercutBySelf ? " You undercut your own order!" : string.Empty)}",
+            Reference = $"{outbid.Amount:N0}{outbid.ItemId}{Math.Round(outbid.PricePerUnit, 1):N1}{outbid.Timestamp.Ticks}".Truncate(32),
             SourceType = "bazaar",
             SourceSubId = "outbid"
         });
