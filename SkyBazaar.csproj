@@ -18,7 +18,7 @@
     <PackageReference Include="CassandraCSharpDriver" Version="3.22.0" />
     <PackageReference Include="Coflnet.Core" Aliases="CoflCore" Version="0.6.0" />
     <PackageReference Include="Coflnet.Sky.EventBroker.Client" Version="0.5.5" />
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.NewtonsoftJson" Version="8.0.21" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.NewtonsoftJson" Version="8.0.22" />
   </ItemGroup>
 
   <!-- Include tests in Debug build to keep them close to source and easier updated -->
