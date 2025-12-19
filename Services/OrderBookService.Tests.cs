@@ -7,6 +7,7 @@ using Coflnet.Sky.SkyBazaar.Models;
 using System.Threading.Tasks;
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using Coflnet.Sky.EventBroker.Client.Model;
 using System.Linq;
 using Confluent.Kafka;
@@ -425,4 +426,366 @@ public class OrderBookServiceTests
         Assert.That(outbidOrders.Count, Is.EqualTo(1), "Only one order should be eligible for notification");
         Assert.That(outbidOrders[0], Is.EqualTo(order3), "Only the top order should be in the outbid list");
     }
+
+    // Tests for UpdateOrderBook method
+
+    [Test]
+    public async Task UpdateOrderBook_BuyOrderUndercut_ShouldNotifyAndRemove()
+    {
+        itemsApiMock.Setup(i => i.ItemNamesGetAsync(0, default)).ReturnsAsync(new List<Items.Client.Model.ItemPreview>() { new() { Tag = "DIAMOND", Name = "Diamond" } });
+        
+        // Add initial top buy order with user
+        var topBuyOrder = new OrderEntry()
+        {
+            Amount = 10,
+            IsSell = false,
+            ItemId = "DIAMOND",
+            PricePerUnit = 100,
+            Timestamp = DateTime.UtcNow.AddSeconds(-10),
+            UserId = "user1",
+            PlayerName = "player1"
+        };
+        
+        await orderBookService.AddOrder(topBuyOrder);
+
+        // Update with lower price buy orders (undercut scenario)
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "DIAMOND",
+            Timestamp = DateTime.UtcNow,
+            BuyOrders = new List<OrderEntry>
+            {
+                new() { Amount = 5, PricePerUnit = 99, IsSell = false }, // Undercutting order
+                new() { Amount = 3, PricePerUnit = 98, IsSell = false }
+            }
+        };
+
+        var result = await orderBookService.UpdateOrderBook(update);
+
+        Assert.That(result, Is.True, "Update should be accepted");
+        
+        // Verify notification was sent
+        messageApiMock.Verify(m => m.MessageSendUserIdPostAsync("user1", It.Is<MessageContainer>(m => 
+            m.Message != null && System.Text.RegularExpressions.Regex.Replace(m.Message, "§.", "").Contains("undercut")), 0, default), Times.Once);
+    }
+
+    [Test]
+    public async Task UpdateOrderBook_SellOrderOutbid_ShouldNotifyAndRemove()
+    {
+        itemsApiMock.Setup(i => i.ItemNamesGetAsync(0, default)).ReturnsAsync(new List<Items.Client.Model.ItemPreview>() { new() { Tag = "EMERALD", Name = "Emerald" } });
+        
+        // Add initial top sell order with user
+        var topSellOrder = new OrderEntry()
+        {
+            Amount = 10,
+            IsSell = true,
+            ItemId = "EMERALD",
+            PricePerUnit = 50,
+            Timestamp = DateTime.UtcNow.AddSeconds(-10),
+            UserId = "user2",
+            PlayerName = "player2"
+        };
+        
+        await orderBookService.AddOrder(topSellOrder);
+
+        // Update with higher price sell orders (outbid scenario)
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "EMERALD",
+            Timestamp = DateTime.UtcNow,
+            SellOrders = new List<OrderEntry>
+            {
+                new() { Amount = 5, PricePerUnit = 51, IsSell = true }, // Outbidding order
+                new() { Amount = 3, PricePerUnit = 52, IsSell = true }
+            }
+        };
+
+        var result = await orderBookService.UpdateOrderBook(update);
+
+        Assert.That(result, Is.True, "Update should be accepted");
+        
+        // Verify notification was sent (looking for the generic outbid notification message)
+        messageApiMock.Verify(m => m.MessageSendUserIdPostAsync("user2", It.IsAny<MessageContainer>(), 0, default), Times.Once);
+    }
+
+    [Test]
+    public async Task UpdateOrderBook_FutureTimestamp_ShouldIgnore()
+    {
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "DIAMOND",
+            Timestamp = DateTime.UtcNow.AddHours(1), // Future timestamp
+            BuyOrders = new List<OrderEntry>
+            {
+                new() { Amount = 5, PricePerUnit = 100, IsSell = false }
+            }
+        };
+
+        var result = await orderBookService.UpdateOrderBook(update);
+
+        Assert.That(result, Is.False, "Update with future timestamp should be ignored");
+        
+        // Verify no orders were added
+        var orderBook = await orderBookService.GetOrderBook("DIAMOND");
+        Assert.That(orderBook.Buy.Count, Is.EqualTo(0), "No orders should be added");
+    }
+
+    [Test]
+    public async Task UpdateOrderBook_NoKafkaTimeYet_AcceptsAnyValidTimestamp()
+    {
+        // When no Kafka update time has been established yet, any valid timestamp should be accepted
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "FRESH",
+            Timestamp = DateTime.UtcNow.AddSeconds(-10), // Even older timestamp should work
+            BuyOrders = new List<OrderEntry>
+            {
+                new() { Amount = 5, PricePerUnit = 10, IsSell = false }
+            }
+        };
+        
+        var result = await orderBookService.UpdateOrderBook(update);
+        Assert.That(result, Is.True, "Update should be accepted when no Kafka time is established yet");
+    }
+
+    [Test]
+    public async Task UpdateOrderBook_NoUserOrder_NoNotification()
+    {
+        itemsApiMock.Setup(i => i.ItemNamesGetAsync(0, default)).ReturnsAsync(new List<Items.Client.Model.ItemPreview>() { new() { Tag = "IRON", Name = "Iron" } });
+        
+        // Add top buy order without user (Kafka data)
+        var topBuyOrder = new OrderEntry()
+        {
+            Amount = 10,
+            IsSell = false,
+            ItemId = "IRON",
+            PricePerUnit = 100,
+            Timestamp = DateTime.UtcNow.AddSeconds(-10),
+            UserId = null, // No user = Kafka order
+            PlayerName = null
+        };
+        
+        await orderBookService.AddOrder(topBuyOrder);
+
+        // Update with lower price
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "IRON",
+            Timestamp = DateTime.UtcNow,
+            BuyOrders = new List<OrderEntry>
+            {
+                new() { Amount = 5, PricePerUnit = 99, IsSell = false }
+            }
+        };
+
+        var result = await orderBookService.UpdateOrderBook(update);
+
+        Assert.That(result, Is.True, "Update should be accepted");
+        
+        // Verify no notification was sent (no user to notify)
+        messageApiMock.Verify(m => m.MessageSendUserIdPostAsync(It.IsAny<string>(), It.IsAny<MessageContainer>(), It.IsAny<int>(), default), Times.Never);
+    }
+
+    [Test]
+    public async Task UpdateOrderBook_PartialUpdate_OnlyBuyOrders()
+    {
+        // Add both buy and sell orders
+        var buyOrder = new OrderEntry()
+        {
+            Amount = 10,
+            IsSell = false,
+            ItemId = "STONE",
+            PricePerUnit = 100,
+            Timestamp = DateTime.UtcNow.AddSeconds(-10),
+            UserId = "user1"
+        };
+        
+        var sellOrder = new OrderEntry()
+        {
+            Amount = 10,
+            IsSell = true,
+            ItemId = "STONE",
+            PricePerUnit = 101,
+            Timestamp = DateTime.UtcNow.AddSeconds(-10),
+            UserId = "user2"
+        };
+        
+        await orderBookService.AddOrder(buyOrder);
+        await orderBookService.AddOrder(sellOrder);
+
+        // Update only buy orders
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "STONE",
+            Timestamp = DateTime.UtcNow,
+            BuyOrders = new List<OrderEntry>
+            {
+                new() { Amount = 5, PricePerUnit = 105, IsSell = false }
+            },
+            SellOrders = null // Only update buy orders
+        };
+
+        var result = await orderBookService.UpdateOrderBook(update);
+
+        Assert.That(result, Is.True, "Update should be accepted");
+        
+        var orderBook = await orderBookService.GetOrderBook("STONE");
+        Assert.That(orderBook.Sell.Count, Is.EqualTo(1), "Sell orders should remain unchanged");
+        Assert.That(orderBook.Buy.Count, Is.GreaterThan(0), "Buy orders should be updated");
+    }
+
+    [Test]
+    public async Task UpdateOrderBook_UpdateExistingPriceLevel_ShouldUpdateAmount()
+    {
+        // Add order at price level 100
+        var order = new OrderEntry()
+        {
+            Amount = 10,
+            IsSell = false,
+            ItemId = "COAL",
+            PricePerUnit = 100,
+            Timestamp = DateTime.UtcNow.AddSeconds(-10),
+            UserId = null
+        };
+        
+        await orderBookService.AddOrder(order);
+
+        var orderBook = await orderBookService.GetOrderBook("COAL");
+        Assert.That(orderBook.Buy.Count, Is.EqualTo(1), "Initial order should be added");
+        Assert.That(orderBook.Buy[0].Amount, Is.EqualTo(10), "Initial amount should be 10");
+
+        // Update same price level with different amount
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "COAL",
+            Timestamp = DateTime.UtcNow,
+            BuyOrders = new List<OrderEntry>
+            {
+                new() { Amount = 15, PricePerUnit = 100, IsSell = false } // Same price, different amount
+            }
+        };
+
+        var result = await orderBookService.UpdateOrderBook(update);
+
+        Assert.That(result, Is.True, "Update should be accepted");
+        
+        orderBook = await orderBookService.GetOrderBook("COAL");
+        Assert.That(orderBook.Buy.Count, Is.EqualTo(1), "No new order should be added");
+        Assert.That(orderBook.Buy[0].Amount, Is.EqualTo(15), "Amount should be updated to 15");
+    }
+
+    [Test]
+    public async Task UpdateOrderBook_MultipleOrdersPreserveNonTop_BuyOrders()
+    {
+        // Add multiple buy orders at different price levels
+        await orderBookService.AddOrder(new OrderEntry() { Amount = 5, IsSell = false, ItemId = "OAK", PricePerUnit = 100, Timestamp = DateTime.UtcNow.AddSeconds(-10), UserId = null });
+        await orderBookService.AddOrder(new OrderEntry() { Amount = 5, IsSell = false, ItemId = "OAK", PricePerUnit = 95, Timestamp = DateTime.UtcNow.AddSeconds(-10), UserId = null });
+        await orderBookService.AddOrder(new OrderEntry() { Amount = 5, IsSell = false, ItemId = "OAK", PricePerUnit = 90, Timestamp = DateTime.UtcNow.AddSeconds(-10), UserId = null });
+
+        var orderBook = await orderBookService.GetOrderBook("OAK");
+        Assert.That(orderBook.Buy.Count, Is.EqualTo(3), "Should have 3 buy orders");
+
+        // Update with only top order
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "OAK",
+            Timestamp = DateTime.UtcNow,
+            BuyOrders = new List<OrderEntry>
+            {
+                new() { Amount = 10, PricePerUnit = 100, IsSell = false } // Top price
+            }
+        };
+
+        var result = await orderBookService.UpdateOrderBook(update);
+
+        Assert.That(result, Is.True, "Update should be accepted");
+        
+        orderBook = await orderBookService.GetOrderBook("OAK");
+        Assert.That(orderBook.Buy.Count, Is.GreaterThanOrEqualTo(3), "Non-top orders should be preserved");
+        
+        var topOrder = orderBook.Buy.OrderByDescending(o => o.PricePerUnit).First();
+        Assert.That(topOrder.Amount, Is.EqualTo(10), "Top order amount should be updated");
+    }
+
+    [Test]
+    public async Task UpdateOrderBook_OlderThanKafkaTimestamp_ShouldIgnore()
+    {
+        var kafkaTime = DateTime.UtcNow.AddSeconds(-5);
+        var olderTime = kafkaTime.AddSeconds(-2);
+        var newerTime = kafkaTime.AddSeconds(2);
+        
+        // Directly inject Kafka timestamp via reflection (simulates BazaarPull having set it)
+        var lastKafkaField = typeof(OrderBookService).GetField("lastKafkaUpdateTime", 
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        var kafkaDict = (ConcurrentDictionary<string, DateTime>)lastKafkaField?.GetValue(orderBookService)
+            ?? new ConcurrentDictionary<string, DateTime>();
+        kafkaDict.AddOrUpdate("GOLD", kafkaTime, (k, v) => kafkaTime);
+
+        // Try to update with older timestamp - should be rejected
+        var update1 = new OrderBookUpdate()
+        {
+            ItemTag = "GOLD",
+            Timestamp = olderTime,
+            BuyOrders = new List<OrderEntry>
+            {
+                new() { Amount = 5, PricePerUnit = 15, IsSell = false }
+            }
+        };
+
+        var result1 = await orderBookService.UpdateOrderBook(update1);
+        Assert.That(result1, Is.False, "Update older than last Kafka update should be ignored");
+
+        // But newer timestamp should be accepted
+        var update2 = new OrderBookUpdate()
+        {
+            ItemTag = "GOLD",
+            Timestamp = newerTime,
+            BuyOrders = new List<OrderEntry>
+            {
+                new() { Amount = 5, PricePerUnit = 15, IsSell = false }
+            }
+        };
+
+        var result2 = await orderBookService.UpdateOrderBook(update2);
+        Assert.That(result2, Is.True, "Update newer than last update should be accepted");
+    }
+
+    [Test]
+    public async Task UpdateOrderBook_AcceptsNewerTimestampThanKafka()
+    {
+        var kafkaTime = DateTime.UtcNow.AddSeconds(-5);
+        
+        // Establish Kafka update time
+        await orderBookService.AddOrder(new OrderEntry() { Amount = 1, IsSell = true, ItemId = "TEST_NEWER", PricePerUnit = 10, Timestamp = kafkaTime, UserId = null });
+
+        // Update with newer timestamp
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "TEST_NEWER",
+            Timestamp = DateTime.UtcNow, // Newer than Kafka time
+            BuyOrders = new List<OrderEntry>
+            {
+                new() { Amount = 5, PricePerUnit = 15, IsSell = false }
+            }
+        };
+
+        var result = await orderBookService.UpdateOrderBook(update);
+
+        Assert.That(result, Is.True, "Update with newer timestamp should be accepted");
+    }
+
+    [Test]
+    public async Task UpdateOrderBook_EmptyOrderLists_ShouldNotThrow()
+    {
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "EMPTY",
+            Timestamp = DateTime.UtcNow,
+            BuyOrders = new List<OrderEntry>(),
+            SellOrders = new List<OrderEntry>()
+        };
+
+        Assert.DoesNotThrowAsync(async () => await orderBookService.UpdateOrderBook(update), "Empty order lists should not throw");
+    }
 }
+

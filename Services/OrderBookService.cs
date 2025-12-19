@@ -21,6 +21,7 @@ public class OrderBookService
     private ISessionContainer sessionContainer;
     private ILogger<OrderBookService> logger;
     private ConcurrentDictionary<string, OrderBook> cache = new ConcurrentDictionary<string, OrderBook>();
+    private ConcurrentDictionary<string, DateTime> lastKafkaUpdateTime = new ConcurrentDictionary<string, DateTime>();
 
     public OrderBookService(ISessionContainer service, IMessageApi messageApi, IItemsApi itemsApi, ILogger<OrderBookService> logger)
     {
@@ -33,6 +34,147 @@ public class OrderBookService
     internal Task<OrderBook> GetOrderBook(string itemTag)
     {
         return Task.FromResult(cache.GetValueOrDefault(itemTag, new OrderBook()));
+    }
+
+    /// <summary>
+    /// Gets order books for multiple items at once
+    /// </summary>
+    /// <param name="itemTags">List of item tags to lookup</param>
+    /// <returns>Dictionary mapping item tags to their order books</returns>
+    public Task<Dictionary<string, OrderBook>> GetOrderBooks(List<string> itemTags)
+    {
+        var result = new Dictionary<string, OrderBook>();
+        foreach (var itemTag in itemTags)
+        {
+            result[itemTag] = cache.GetValueOrDefault(itemTag, new OrderBook());
+        }
+        return Task.FromResult(result);
+    }
+
+    /// <summary>
+    /// Updates the in-memory order book with external data.
+    /// Validates timestamp against Kafka data and ignores if older or in the future.
+    /// </summary>
+    /// <param name="update">The order book update</param>
+    /// <returns>True if the update was applied, false if it was ignored</returns>
+    public async Task<bool> UpdateOrderBook(OrderBookUpdate update)
+    {
+        var now = DateTime.UtcNow;
+        
+        // Ignore if timestamp is in the future
+        if (update.Timestamp > now)
+        {
+            logger.LogWarning($"Ignoring order book update for {update.ItemTag}: timestamp {update.Timestamp} is in the future (now: {now})");
+            return false;
+        }
+
+        // Check if we have a last Kafka update time for this item
+        if (lastKafkaUpdateTime.TryGetValue(update.ItemTag, out var lastKafkaTime))
+        {
+            // Ignore if older than the last Kafka update
+            if (update.Timestamp <= lastKafkaTime)
+            {
+                logger.LogWarning($"Ignoring order book update for {update.ItemTag}: timestamp {update.Timestamp} is older than last Kafka update {lastKafkaTime}");
+                return false;
+            }
+        }
+
+        var orderBook = cache.GetOrAdd(update.ItemTag, (key) => new OrderBook());
+
+        // Update buy orders if provided (top orders only for outbid/undercut detection)
+        if (update.BuyOrders != null && update.BuyOrders.Count > 0)
+        {
+            // Sort incoming buy orders by price descending (highest first)
+            var incomingBuyOrders = update.BuyOrders.OrderByDescending(o => o.PricePerUnit).ToList();
+            
+            // Find existing top buy order (highest price)
+            var topBuyOrder = orderBook.Buy.OrderByDescending(o => o.PricePerUnit).FirstOrDefault();
+            
+            // Remove orders that are no longer at the top (undercut)
+            if (topBuyOrder != null && incomingBuyOrders.FirstOrDefault() != null)
+            {
+                var incomingTopPrice = incomingBuyOrders.First().PricePerUnit;
+                if (Math.Round(topBuyOrder.PricePerUnit, 1) > Math.Round(incomingTopPrice, 1) && topBuyOrder.UserId != null)
+                {
+                    // Our top buy order was undercut
+                    orderBook.Buy.Remove(topBuyOrder);
+                    logger.LogInformation($"Removed undercut buy order for {update.ItemTag} at price {topBuyOrder.PricePerUnit}");
+                    
+                    // Notify user about undercut
+                    await SendUndercutNotification(topBuyOrder, incomingBuyOrders.First());
+                }
+            }
+            
+            // Update or add incoming top buy orders
+            foreach (var incomingOrder in incomingBuyOrders)
+            {
+                incomingOrder.ItemId = update.ItemTag;
+                incomingOrder.IsSell = false;
+                incomingOrder.Timestamp = update.Timestamp;
+                
+                // Check if this price level already exists
+                var existingOrder = orderBook.Buy.FirstOrDefault(o => Math.Round(o.PricePerUnit, 1) == Math.Round(incomingOrder.PricePerUnit, 1));
+                if (existingOrder != null)
+                {
+                    // Update amount if it changed
+                    existingOrder.Amount = incomingOrder.Amount;
+                }
+                else
+                {
+                    // Add new order at this price level
+                    orderBook.Buy.Add(incomingOrder);
+                }
+            }
+        }
+
+        // Update sell orders if provided (top orders only for outbid/undercut detection)
+        if (update.SellOrders != null && update.SellOrders.Count > 0)
+        {
+            // Sort incoming sell orders by price ascending (lowest first)
+            var incomingSellOrders = update.SellOrders.OrderBy(o => o.PricePerUnit).ToList();
+            
+            // Find existing top sell order (lowest price)
+            var topSellOrder = orderBook.Sell.OrderBy(o => o.PricePerUnit).FirstOrDefault();
+            
+            // Remove orders that are no longer at the top (outbid)
+            if (topSellOrder != null && incomingSellOrders.FirstOrDefault() != null)
+            {
+                var incomingTopPrice = incomingSellOrders.First().PricePerUnit;
+                if (Math.Round(topSellOrder.PricePerUnit, 1) < Math.Round(incomingTopPrice, 1) && topSellOrder.UserId != null)
+                {
+                    // Our top sell order was outbid
+                    orderBook.Sell.Remove(topSellOrder);
+                    logger.LogInformation($"Removed outbid sell order for {update.ItemTag} at price {topSellOrder.PricePerUnit}");
+                    
+                    // Notify user about outbid
+                    await SendOutbidNotification(incomingSellOrders.First(), topSellOrder);
+                }
+            }
+            
+            // Update or add incoming top sell orders
+            foreach (var incomingOrder in incomingSellOrders)
+            {
+                incomingOrder.ItemId = update.ItemTag;
+                incomingOrder.IsSell = true;
+                incomingOrder.Timestamp = update.Timestamp;
+                
+                // Check if this price level already exists
+                var existingOrder = orderBook.Sell.FirstOrDefault(o => Math.Round(o.PricePerUnit, 1) == Math.Round(incomingOrder.PricePerUnit, 1));
+                if (existingOrder != null)
+                {
+                    // Update amount if it changed
+                    existingOrder.Amount = incomingOrder.Amount;
+                }
+                else
+                {
+                    // Add new order at this price level
+                    orderBook.Sell.Add(incomingOrder);
+                }
+            }
+        }
+
+        logger.LogInformation($"Updated in-memory order book for {update.ItemTag} with timestamp {update.Timestamp} (buy: {update.BuyOrders?.Count ?? 0}, sell: {update.SellOrders?.Count ?? 0})");
+        return true;
     }
 
     public async Task AddOrder(OrderEntry order)
@@ -92,6 +234,28 @@ public class OrderBookService
         logger.LogInformation($"order book: User {outbid.UserId} was {action} by {newOrder.UserId} for {newOrder.ItemId} {newOrder.Amount}x {newOrder.PricePerUnit}");
     }
 
+    private async Task SendUndercutNotification(OrderEntry existingOrder, OrderEntry undercuttingOrder)
+    {
+        var gray = "§7";
+        var green = "§a";
+        var red = "§c";
+        var aqua = "§b";
+        var names = await itemsApi.ItemNamesGetAsync();
+        var name = names?.Where(n => n.Tag == existingOrder.ItemId).FirstOrDefault()?.Name;
+        var differenceAmount = Math.Round(Math.Abs(existingOrder.PricePerUnit - undercuttingOrder.PricePerUnit), 1);
+
+        await messageApi.MessageSendUserIdPostAsync(existingOrder.UserId, new()
+        {
+            Summary = "Your order was undercut",
+            Message = $"{gray}Your {green}buy{gray}-order for {aqua}{existingOrder.Amount:N0}x {name ?? "item"}{gray} has been {red}undercut{gray} by an order of {aqua}{undercuttingOrder.Amount:N0}x{gray} "
+             + $"at {green}{Math.Round(undercuttingOrder.PricePerUnit, 1):N1}{gray} per unit ({red}-{differenceAmount.ToString("N1")}{gray}).",
+            Reference = $"{existingOrder.Amount:N0}{existingOrder.ItemId}{Math.Round(existingOrder.PricePerUnit, 1):N1}{existingOrder.Timestamp.Ticks}".Truncate(32),
+            SourceType = "bazaar",
+            SourceSubId = "undercut"
+        });
+        logger.LogInformation($"order book: User {existingOrder.UserId} was undercut for {existingOrder.ItemId} {existingOrder.Amount}x buy at {existingOrder.PricePerUnit}");
+    }
+
     protected virtual async Task UpdateInDb(OrderEntry order)
     {
         if (order.UserId == null)
@@ -112,8 +276,12 @@ public class OrderBookService
 
     public async Task BazaarPull(BazaarPull pull)
     {
+        // Track the last update time from Kafka
         await Parallel.ForEachAsync(pull.Products, async (product, cancle) =>
         {
+            lastKafkaUpdateTime.AddOrUpdate(product.ProductId, pull.Timestamp, (key, oldValue) => 
+                pull.Timestamp > oldValue ? pull.Timestamp : oldValue);
+            
             var orderBook = cache.GetOrAdd(product.ProductId, (key) =>
             {
                 var book = new OrderBook();

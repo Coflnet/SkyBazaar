@@ -59,5 +59,31 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
         {
             await service.RemoveOrder(itemTag, userId, timestamp);
         }
+
+        /// <summary>
+        /// Updates the in-memory order book with external data.
+        /// Ignores updates that are older than the last Kafka update or in the future.
+        /// Each side (buy/sell) is ignored when empty.
+        /// </summary>
+        /// <param name="update">The order book update with timestamp</param>
+        /// <returns>True if the update was applied, false if it was ignored</returns>
+        [HttpPost]
+        [Route("update")]
+        public async Task<bool> UpdateOrderBook([FromBody] OrderBookUpdate update)
+        {
+            return await service.UpdateOrderBook(update);
+        }
+
+        /// <summary>
+        /// Batch lookup of order books for multiple items
+        /// </summary>
+        /// <param name="itemTags">List of item tags to lookup</param>
+        /// <returns>Dictionary mapping item tags to their current order books</returns>
+        [HttpPost]
+        [Route("batch")]
+        public async Task<Dictionary<string, OrderBook>> GetOrderBooks([FromBody] List<string> itemTags)
+        {
+            return await service.GetOrderBooks(itemTags);
+        }
     }
 }
