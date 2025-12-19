@@ -118,11 +118,24 @@ public class OrderBookService
                 {
                     // Update amount if it changed
                     existingOrder.Amount = incomingOrder.Amount;
+                    // Remove order if it was filled (amount <= 0)
+                    if (existingOrder.Amount <= 0)
+                    {
+                        orderBook.Buy.Remove(existingOrder);
+                        logger.LogInformation($"Removed filled buy order for {update.ItemTag} at price {existingOrder.PricePerUnit} (amount was {incomingOrder.Amount})");
+                    }
                 }
                 else
                 {
-                    // Add new order at this price level
-                    orderBook.Buy.Add(incomingOrder);
+                    // Only add new order if amount is positive
+                    if (incomingOrder.Amount > 0)
+                    {
+                        orderBook.Buy.Add(incomingOrder);
+                    }
+                    else
+                    {
+                        logger.LogWarning($"Skipping invalid buy order for {update.ItemTag} at price {incomingOrder.PricePerUnit} with amount {incomingOrder.Amount}");
+                    }
                 }
             }
         }
@@ -164,11 +177,24 @@ public class OrderBookService
                 {
                     // Update amount if it changed
                     existingOrder.Amount = incomingOrder.Amount;
+                    // Remove order if it was filled (amount <= 0)
+                    if (existingOrder.Amount <= 0)
+                    {
+                        orderBook.Sell.Remove(existingOrder);
+                        logger.LogInformation($"Removed filled sell order for {update.ItemTag} at price {existingOrder.PricePerUnit} (amount was {incomingOrder.Amount})");
+                    }
                 }
                 else
                 {
-                    // Add new order at this price level
-                    orderBook.Sell.Add(incomingOrder);
+                    // Only add new order if amount is positive
+                    if (incomingOrder.Amount > 0)
+                    {
+                        orderBook.Sell.Add(incomingOrder);
+                    }
+                    else
+                    {
+                        logger.LogWarning($"Skipping invalid sell order for {update.ItemTag} at price {incomingOrder.PricePerUnit} with amount {incomingOrder.Amount}");
+                    }
                 }
             }
         }
@@ -179,6 +205,13 @@ public class OrderBookService
 
     public async Task AddOrder(OrderEntry order)
     {
+        // Reject orders with negative or zero amounts
+        if (order.Amount <= 0)
+        {
+            logger.LogWarning($"order book: Rejecting order with invalid amount {order.Amount} for {order.ItemId} at {order.PricePerUnit}");
+            return;
+        }
+
         var orderBook = cache.GetOrAdd(order.ItemId, (key) =>
         {
             var book = new OrderBook();
@@ -299,9 +332,13 @@ public class OrderBookService
                 var current = side.Where(o => o.PricePerUnit == item.PricePerUnit).Sum(o => o.Amount);
                 if (current == item.Amount)
                     continue; // all orders known
+                var delta = item.Amount - current;
+                // Skip if delta is negative or zero (order was filled)
+                if (delta <= 0)
+                    continue;
                 var order = new OrderEntry()
                 {
-                    Amount = item.Amount - current,
+                    Amount = delta,
                     IsSell = true,
                     ItemId = product.ProductId,
                     PlayerName = null,
@@ -318,9 +355,13 @@ public class OrderBookService
                 var current = side.Where(o => o.PricePerUnit == item.PricePerUnit).Sum(o => o.Amount);
                 if (current == item.Amount)
                     continue; // all orders known
+                var delta = item.Amount - current;
+                // Skip if delta is negative or zero (order was filled)
+                if (delta <= 0)
+                    continue;
                 var order = new OrderEntry()
                 {
-                    Amount = item.Amount - current,
+                    Amount = delta,
                     IsSell = false,
                     ItemId = product.ProductId,
                     PlayerName = null,

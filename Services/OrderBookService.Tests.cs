@@ -787,5 +787,100 @@ public class OrderBookServiceTests
 
         Assert.DoesNotThrowAsync(async () => await orderBookService.UpdateOrderBook(update), "Empty order lists should not throw");
     }
+
+    [Test]
+    public async Task AddOrder_NegativeAmount_ShouldBeRejected()
+    {
+        var negativeOrder = new OrderEntry()
+        {
+            Amount = -1,
+            IsSell = false,
+            ItemId = "BOOSTER_COOKIE",
+            PricePerUnit = 9806978.7,
+            Timestamp = DateTime.UtcNow,
+            UserId = "user1"
+        };
+
+        await orderBookService.AddOrder(negativeOrder);
+
+        var orderBook = await orderBookService.GetOrderBook("BOOSTER_COOKIE");
+        Assert.That(orderBook.Buy.Count, Is.EqualTo(0), "Negative amount orders should not be added");
+    }
+
+    [Test]
+    public async Task UpdateOrderBook_NegativeAmount_ShouldRemoveOrder()
+    {
+        // Add an initial order
+        var initialOrder = new OrderEntry()
+        {
+            Amount = 10,
+            IsSell = false,
+            ItemId = "COOKIE",
+            PricePerUnit = 100,
+            Timestamp = DateTime.UtcNow.AddSeconds(-10),
+            UserId = "user1"
+        };
+
+        await orderBookService.AddOrder(initialOrder);
+
+        var orderBook = await orderBookService.GetOrderBook("COOKIE");
+        Assert.That(orderBook.Buy.Count, Is.EqualTo(1), "Initial order should be added");
+
+        // Update with negative amount (order was filled)
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "COOKIE",
+            Timestamp = DateTime.UtcNow,
+            BuyOrders = new List<OrderEntry>
+            {
+                new() { Amount = -1, PricePerUnit = 100, IsSell = false }
+            }
+        };
+
+        var result = await orderBookService.UpdateOrderBook(update);
+
+        Assert.That(result, Is.True, "Update should be accepted");
+
+        orderBook = await orderBookService.GetOrderBook("COOKIE");
+        Assert.That(orderBook.Buy.Count, Is.EqualTo(0), "Order with negative amount should be removed");
+    }
+
+    [Test]
+    public async Task UpdateOrderBook_ZeroAmount_ShouldRemoveOrder()
+    {
+        // Add an initial order
+        var initialOrder = new OrderEntry()
+        {
+            Amount = 5,
+            IsSell = true,
+            ItemId = "DIAMOND",
+            PricePerUnit = 50,
+            Timestamp = DateTime.UtcNow.AddSeconds(-10),
+            UserId = "user2"
+        };
+
+        await orderBookService.AddOrder(initialOrder);
+
+        var orderBook = await orderBookService.GetOrderBook("DIAMOND");
+        Assert.That(orderBook.Sell.Count, Is.EqualTo(1), "Initial order should be added");
+
+        // Update with zero amount (order was completely filled)
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "DIAMOND",
+            Timestamp = DateTime.UtcNow,
+            SellOrders = new List<OrderEntry>
+            {
+                new() { Amount = 0, PricePerUnit = 50, IsSell = true }
+            }
+        };
+
+        var result = await orderBookService.UpdateOrderBook(update);
+
+        Assert.That(result, Is.True, "Update should be accepted");
+
+        orderBook = await orderBookService.GetOrderBook("DIAMOND");
+        Assert.That(orderBook.Sell.Count, Is.EqualTo(0), "Order with zero amount should be removed");
+    }
 }
 
