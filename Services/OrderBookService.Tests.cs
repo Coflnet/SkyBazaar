@@ -882,5 +882,78 @@ public class OrderBookServiceTests
         orderBook = await orderBookService.GetOrderBook("DIAMOND");
         Assert.That(orderBook.Sell.Count, Is.EqualTo(0), "Order with zero amount should be removed");
     }
+
+    [Test]
+    public async Task UpdateOrderBook_PartialFillScenario_ShouldRemoveFilledOrders()
+    {
+        // Simulate the DUSTGRAIN scenario: existing order book state
+        var existingOrders = new List<OrderEntry>
+        {
+            new() { Amount = 9, PricePerUnit = 134199.9, IsSell = true, ItemId = "DUSTGRAIN", UserId = null, Timestamp = DateTime.UtcNow.AddSeconds(-30) },
+            new() { Amount = 2, PricePerUnit = 134200.0, IsSell = true, ItemId = "DUSTGRAIN", UserId = null, Timestamp = DateTime.UtcNow.AddSeconds(-30) },
+            new() { Amount = 34, PricePerUnit = 134281.8, IsSell = true, ItemId = "DUSTGRAIN", UserId = null, Timestamp = DateTime.UtcNow.AddSeconds(-30) },
+            new() { Amount = 1, PricePerUnit = 134281.9, IsSell = true, ItemId = "DUSTGRAIN", UserId = null, Timestamp = DateTime.UtcNow.AddSeconds(-30) },
+            new() { Amount = 39, PricePerUnit = 134282.0, IsSell = true, ItemId = "DUSTGRAIN", UserId = null, Timestamp = DateTime.UtcNow.AddSeconds(-30) },
+            new() { Amount = 5, PricePerUnit = 134282.1, IsSell = true, ItemId = "DUSTGRAIN", UserId = null, Timestamp = DateTime.UtcNow.AddSeconds(-30) },
+            new() { Amount = 7, PricePerUnit = 134282.2, IsSell = true, ItemId = "DUSTGRAIN", UserId = null, Timestamp = DateTime.UtcNow.AddSeconds(-30) },
+            new() { Amount = 5, PricePerUnit = 134282.3, IsSell = true, ItemId = "DUSTGRAIN", UserId = null, Timestamp = DateTime.UtcNow.AddSeconds(-30) },
+            new() { Amount = 2, PricePerUnit = 134282.8, IsSell = true, ItemId = "DUSTGRAIN", UserId = null, Timestamp = DateTime.UtcNow.AddSeconds(-30) },
+            new() { Amount = 3, PricePerUnit = 134282.9, IsSell = true, ItemId = "DUSTGRAIN", UserId = null, Timestamp = DateTime.UtcNow.AddSeconds(-30) },
+            new() { Amount = 8, PricePerUnit = 134283.0, IsSell = true, ItemId = "DUSTGRAIN", UserId = null, Timestamp = DateTime.UtcNow.AddSeconds(-30) }
+        };
+
+        foreach (var order in existingOrders)
+        {
+            await orderBookService.AddOrder(order);
+        }
+
+        var orderBook = await orderBookService.GetOrderBook("DUSTGRAIN");
+        Assert.That(orderBook.Sell.Count, Is.EqualTo(11), "Should have 11 existing sell orders");
+
+        // Post update with partial fill - some orders completely removed (filled), amounts reduced for others
+        var update = new OrderBookUpdate()
+        {
+            ItemTag = "DUSTGRAIN",
+            Timestamp = DateTime.UtcNow,
+            SellOrders = new List<OrderEntry>
+            {
+                new() { Amount = 20, PricePerUnit = 134281.8, IsSell = true }, // Was 34, now 20 (14 filled)
+                new() { Amount = 1, PricePerUnit = 134281.9, IsSell = true },  // Same (0 filled)
+                // 134282.0 missing - completely filled
+                new() { Amount = 5, PricePerUnit = 134282.1, IsSell = true },  // Same (0 filled)
+                new() { Amount = 7, PricePerUnit = 134282.2, IsSell = true },  // Same (0 filled)
+                new() { Amount = 5, PricePerUnit = 134282.3, IsSell = true },  // Same (0 filled)
+                new() { Amount = 2, PricePerUnit = 134282.8, IsSell = true },  // Same (0 filled)
+                new() { Amount = 3, PricePerUnit = 134282.9, IsSell = true }   // Same (0 filled)
+                // 134283.0 missing - completely filled
+            }
+        };
+
+        var result = await orderBookService.UpdateOrderBook(update);
+
+        Assert.That(result, Is.True, "Update should be accepted");
+
+        orderBook = await orderBookService.GetOrderBook("DUSTGRAIN");
+        
+        // The update should remove only orders that:
+        // 1. Fall within the min/max price range of the incoming update [134281.8, 134282.9]
+        // 2. Are NOT in the incoming update
+        // This handles filled orders while preserving orders outside the range
+        //
+        // Initial 11 orders:
+        // - 134199.9 (below range) → kept
+        // - 134200.0 (below range) → kept  
+        // - 134281.8, 134281.9, 134282.0*, 134282.1, 134282.2, 134282.3, 134282.8, 134282.9 (8 in range, 7 in update)
+        // - 134283.0 (above range) → kept
+        // Result: 11 - 1 (134282.0) = 10 orders
+        Assert.That(orderBook.Sell.Count, Is.EqualTo(10), "Should have 10 sell orders (1 removed within range, others preserved)");
+        
+        // Verify the correct order was removed
+        var pricesAfterUpdate = orderBook.Sell.OrderBy(o => o.PricePerUnit).Select(o => o.PricePerUnit).ToList();
+        Assert.That(pricesAfterUpdate, Contains.Item(134199.9), "Orders below update range should be preserved");
+        Assert.That(pricesAfterUpdate, Contains.Item(134200.0), "Orders below update range should be preserved");
+        Assert.That(pricesAfterUpdate, Does.Not.Contain(134282.0), "134282.0 should be removed (not in update, within range)");
+        Assert.That(pricesAfterUpdate, Contains.Item(134283.0), "Orders above update range should be preserved");
+    }
 }
 

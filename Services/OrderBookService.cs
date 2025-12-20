@@ -138,6 +138,25 @@ public class OrderBookService
                     }
                 }
             }
+
+            // Remove buy orders that are covered by the incoming update range and are not present
+            // Only remove orders within [minIncoming, maxIncoming] that aren't in the update
+            // This handles filled orders while preserving orders outside the update range
+            if (incomingBuyOrders.Count > 0)
+            {
+                var minIncomingPrice = incomingBuyOrders.Min(o => o.PricePerUnit);
+                var maxIncomingPrice = incomingBuyOrders.Max(o => o.PricePerUnit);
+                var incomingBuyPrices = incomingBuyOrders.Select(o => Math.Round(o.PricePerUnit, 1)).ToHashSet();
+                var ordersToRemove = orderBook.Buy
+                    .Where(o => o.PricePerUnit >= minIncomingPrice && o.PricePerUnit <= maxIncomingPrice 
+                        && !incomingBuyPrices.Contains(Math.Round(o.PricePerUnit, 1)))
+                    .ToList();
+                foreach (var order in ordersToRemove)
+                {
+                    orderBook.Buy.Remove(order);
+                    logger.LogInformation($"Removed buy order for {update.ItemTag} at price {order.PricePerUnit} - not in incoming update (completely filled)");
+                }
+            }
         }
 
         // Update sell orders if provided (top orders only for outbid/undercut detection)
@@ -195,6 +214,25 @@ public class OrderBookService
                     {
                         logger.LogWarning($"Skipping invalid sell order for {update.ItemTag} at price {incomingOrder.PricePerUnit} with amount {incomingOrder.Amount}");
                     }
+                }
+            }
+
+            // Remove sell orders that are covered by the incoming update range and are not present
+            // Only remove orders within [minIncoming, maxIncoming] that aren't in the update
+            // This handles filled orders while preserving orders outside the update range
+            if (incomingSellOrders.Count > 0)
+            {
+                var minIncomingPrice = incomingSellOrders.Min(o => o.PricePerUnit);
+                var maxIncomingPrice = incomingSellOrders.Max(o => o.PricePerUnit);
+                var incomingSellPrices = incomingSellOrders.Select(o => Math.Round(o.PricePerUnit, 1)).ToHashSet();
+                var sellOrdersToRemove = orderBook.Sell
+                    .Where(o => o.PricePerUnit >= minIncomingPrice && o.PricePerUnit <= maxIncomingPrice 
+                        && !incomingSellPrices.Contains(Math.Round(o.PricePerUnit, 1)))
+                    .ToList();
+                foreach (var order in sellOrdersToRemove)
+                {
+                    orderBook.Sell.Remove(order);
+                    logger.LogInformation($"Removed sell order for {update.ItemTag} at price {order.PricePerUnit} - not in incoming update (completely filled)");
                 }
             }
         }
