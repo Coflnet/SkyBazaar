@@ -13,6 +13,7 @@ using dev;
 using Microsoft.Extensions.Logging;
 
 namespace Coflnet.Sky.SkyAuctionTracker.Services;
+
 public class OrderBookService
 {
     private readonly IMessageApi messageApi;
@@ -60,7 +61,7 @@ public class OrderBookService
     public async Task<bool> UpdateOrderBook(OrderBookUpdate update)
     {
         var now = DateTime.UtcNow;
-        
+
         // Ignore if timestamp is in the future
         if (update.Timestamp > now)
         {
@@ -86,10 +87,10 @@ public class OrderBookService
         {
             // Sort incoming buy orders by price descending (highest first)
             var incomingBuyOrders = update.BuyOrders.OrderByDescending(o => o.PricePerUnit).ToList();
-            
+
             // Find existing top buy order (highest price)
             var topBuyOrder = orderBook.Buy.OrderByDescending(o => o.PricePerUnit).FirstOrDefault();
-            
+
             // Remove orders that are no longer at the top (undercut)
             if (topBuyOrder != null && incomingBuyOrders.FirstOrDefault() != null)
             {
@@ -99,19 +100,19 @@ public class OrderBookService
                     // Our top buy order was undercut
                     orderBook.Buy.Remove(topBuyOrder);
                     logger.LogInformation($"Removed extra buy order for {update.ItemTag} at price {topBuyOrder.PricePerUnit} - new:{incomingTopPrice}");
-                    
+
                     // Notify user about undercut
                     await SendUndercutNotification(topBuyOrder, incomingBuyOrders.First());
                 }
             }
-            
+
             // Update or add incoming top buy orders
             foreach (var incomingOrder in incomingBuyOrders)
             {
                 incomingOrder.ItemId = update.ItemTag;
                 incomingOrder.IsSell = false;
                 incomingOrder.Timestamp = update.Timestamp;
-                
+
                 // Check if this price level already exists
                 var existingOrder = orderBook.Buy.FirstOrDefault(o => Math.Round(o.PricePerUnit, 1) == Math.Round(incomingOrder.PricePerUnit, 1));
                 if (existingOrder != null)
@@ -148,7 +149,7 @@ public class OrderBookService
                 var maxIncomingPrice = incomingBuyOrders.Max(o => o.PricePerUnit);
                 var incomingBuyPrices = incomingBuyOrders.Select(o => Math.Round(o.PricePerUnit, 1)).ToHashSet();
                 var ordersToRemove = orderBook.Buy
-                    .Where(o => o.PricePerUnit >= minIncomingPrice && o.PricePerUnit <= maxIncomingPrice 
+                    .Where(o => o.PricePerUnit >= minIncomingPrice && o.PricePerUnit <= maxIncomingPrice
                         && !incomingBuyPrices.Contains(Math.Round(o.PricePerUnit, 1)))
                     .ToList();
                 foreach (var order in ordersToRemove)
@@ -164,10 +165,10 @@ public class OrderBookService
         {
             // Sort incoming sell orders by price ascending (lowest first)
             var incomingSellOrders = update.SellOrders.OrderBy(o => o.PricePerUnit).ToList();
-            
+
             // Find existing top sell order (lowest price)
             var topSellOrder = orderBook.Sell.OrderBy(o => o.PricePerUnit).FirstOrDefault();
-            
+
             // Remove orders that are no longer at the top (outbid)
             if (topSellOrder != null && incomingSellOrders.FirstOrDefault() != null)
             {
@@ -177,19 +178,19 @@ public class OrderBookService
                     // Our top sell order was outbid
                     orderBook.Sell.Remove(topSellOrder);
                     logger.LogInformation($"Removed outbid sell order for {update.ItemTag} at price {topSellOrder.PricePerUnit} - new:{incomingTopPrice}");
-                    
+
                     // Notify user about outbid
                     await SendOutbidNotification(incomingSellOrders.First(), topSellOrder);
                 }
             }
-            
+
             // Update or add incoming top sell orders
             foreach (var incomingOrder in incomingSellOrders)
             {
                 incomingOrder.ItemId = update.ItemTag;
                 incomingOrder.IsSell = true;
                 incomingOrder.Timestamp = update.Timestamp;
-                
+
                 // Check if this price level already exists
                 var existingOrder = orderBook.Sell.FirstOrDefault(o => Math.Round(o.PricePerUnit, 1) == Math.Round(incomingOrder.PricePerUnit, 1));
                 if (existingOrder != null)
@@ -226,7 +227,7 @@ public class OrderBookService
                 var maxIncomingPrice = incomingSellOrders.Max(o => o.PricePerUnit);
                 var incomingSellPrices = incomingSellOrders.Select(o => Math.Round(o.PricePerUnit, 1)).ToHashSet();
                 var sellOrdersToRemove = orderBook.Sell
-                    .Where(o => o.PricePerUnit >= minIncomingPrice && o.PricePerUnit <= maxIncomingPrice 
+                    .Where(o => o.PricePerUnit >= minIncomingPrice && o.PricePerUnit <= maxIncomingPrice
                         && !incomingSellPrices.Contains(Math.Round(o.PricePerUnit, 1)))
                     .ToList();
                 foreach (var order in sellOrdersToRemove)
@@ -350,9 +351,9 @@ public class OrderBookService
         // Track the last update time from Kafka
         await Parallel.ForEachAsync(pull.Products, async (product, cancle) =>
         {
-            lastKafkaUpdateTime.AddOrUpdate(product.ProductId, pull.Timestamp, (key, oldValue) => 
+            lastKafkaUpdateTime.AddOrUpdate(product.ProductId, pull.Timestamp, (key, oldValue) =>
                 pull.Timestamp > oldValue ? pull.Timestamp : oldValue);
-            
+
             var orderBook = cache.GetOrAdd(product.ProductId, (key) =>
             {
                 var book = new OrderBook();
@@ -437,7 +438,11 @@ public class OrderBookService
             if (orderBook.Remove(order))
                 logger.LogInformation($"order book: User {order.UserId} removed order for {order.ItemId} {order.Amount}x {order.PricePerUnit}");
             else
+            {
                 logger.LogWarning($"order book: User {order.UserId} tried to remove non existing order for {order.ItemId} {order.Amount}x {order.PricePerUnit} {order.Timestamp}");
+                if (int.TryParse(order.UserId, out int userIdInt) && userIdInt < 500)
+                    logger.LogInformation($"{Newtonsoft.Json.JsonConvert.SerializeObject(orderBook)}\n{Newtonsoft.Json.JsonConvert.SerializeObject(order)}");
+            }
             await RemoveFromDb(order);
         }
     }
@@ -464,7 +469,7 @@ public class OrderBookService
                     .Where(o => o.UserId != null)
                     .OrderBy(o => o.PricePerUnit)
                     .FirstOrDefault();
-                
+
                 foreach (var order in orderBook.Sell.Where(o => o.UserId != null && o != topSellOrder))
                 {
                     order.HasBeenNotified = true;
@@ -478,7 +483,7 @@ public class OrderBookService
                     .Where(o => o.UserId != null)
                     .OrderByDescending(o => o.PricePerUnit)
                     .FirstOrDefault();
-                
+
                 foreach (var order in orderBook.Buy.Where(o => o.UserId != null && o != topBuyOrder))
                 {
                     order.HasBeenNotified = true;
@@ -525,10 +530,10 @@ public class OrderBookService
 
                     side.Add(order);
                 }
-                
+
                 // After loading all orders, mark old orders as notified except for the top order
                 MarkOldOrdersAsNotified();
-                
+
                 return;
             }
             catch (System.Exception e)
