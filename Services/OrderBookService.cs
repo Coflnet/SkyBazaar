@@ -94,7 +94,7 @@ public class OrderBookService
             if (topBuyOrder != null && incomingBuyOrders.FirstOrDefault() != null)
             {
                 var incomingTopPrice = incomingBuyOrders.First().PricePerUnit;
-                if (Math.Round(topBuyOrder.PricePerUnit, 1) > Math.Round(incomingTopPrice, 1) && topBuyOrder.UserId != null)
+                if (Math.Round(topBuyOrder.PricePerUnit, 1) < Math.Round(incomingTopPrice, 1) && topBuyOrder.UserId != null)
                 {
                     // Our top buy order was undercut
                     orderBook.Buy.Remove(topBuyOrder);
