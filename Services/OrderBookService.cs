@@ -176,7 +176,7 @@ public class OrderBookService
                 {
                     // Our top sell order was outbid
                     orderBook.Sell.Remove(topSellOrder);
-                    logger.LogInformation($"Removed outbid sell order for {update.ItemTag} at price {topSellOrder.PricePerUnit}");
+                    logger.LogInformation($"Removed outbid sell order for {update.ItemTag} at price {topSellOrder.PricePerUnit} - new:{incomingTopPrice}");
                     
                     // Notify user about outbid
                     await SendOutbidNotification(incomingSellOrders.First(), topSellOrder);
