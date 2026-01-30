@@ -98,7 +98,7 @@ public class OrderBookService
                 {
                     // Our top buy order was undercut
                     orderBook.Buy.Remove(topBuyOrder);
-                    logger.LogInformation($"Removed undercut buy order for {update.ItemTag} at price {topBuyOrder.PricePerUnit}");
+                    logger.LogInformation($"Removed extra buy order for {update.ItemTag} at price {topBuyOrder.PricePerUnit} - new:{incomingTopPrice}");
                     
                     // Notify user about undercut
                     await SendUndercutNotification(topBuyOrder, incomingBuyOrders.First());
@@ -172,7 +172,7 @@ public class OrderBookService
             if (topSellOrder != null && incomingSellOrders.FirstOrDefault() != null)
             {
                 var incomingTopPrice = incomingSellOrders.First().PricePerUnit;
-                if (Math.Round(topSellOrder.PricePerUnit, 1) < Math.Round(incomingTopPrice, 1) && topSellOrder.UserId != null)
+                if (Math.Round(topSellOrder.PricePerUnit, 1) > Math.Round(incomingTopPrice, 1) && topSellOrder.UserId != null)
                 {
                     // Our top sell order was outbid
                     orderBook.Sell.Remove(topSellOrder);
