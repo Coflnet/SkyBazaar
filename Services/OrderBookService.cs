@@ -102,7 +102,7 @@ public class OrderBookService
                     logger.LogInformation($"Removed extra buy order for {update.ItemTag} at price {topBuyOrder.PricePerUnit} - new:{incomingTopPrice}");
 
                     // Notify user about undercut
-                    await SendUndercutNotification(topBuyOrder, incomingBuyOrders.First());
+                    await SendOutbidNotification(topBuyOrder, incomingBuyOrders.First());
                 }
             }
 
@@ -180,7 +180,7 @@ public class OrderBookService
                     logger.LogInformation($"Removed outbid sell order for {update.ItemTag} at price {topSellOrder.PricePerUnit} - new:{incomingTopPrice}");
 
                     // Notify user about outbid
-                    await SendOutbidNotification(incomingSellOrders.First(), topSellOrder);
+                    await SendUndercutNotification(incomingSellOrders.First(), topSellOrder);
                 }
             }
 
