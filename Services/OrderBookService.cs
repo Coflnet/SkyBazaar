@@ -23,6 +23,7 @@ public class OrderBookService
     private ILogger<OrderBookService> logger;
     private ConcurrentDictionary<string, OrderBook> cache = new ConcurrentDictionary<string, OrderBook>();
     private ConcurrentDictionary<string, DateTime> lastKafkaUpdateTime = new ConcurrentDictionary<string, DateTime>();
+    private HashSet<string> lastBazaarItems = new();
 
     public OrderBookService(ISessionContainer service, IMessageApi messageApi, IItemsApi itemsApi, ILogger<OrderBookService> logger)
     {
@@ -348,6 +349,9 @@ public class OrderBookService
 
     public async Task BazaarPull(BazaarPull pull)
     {
+        // Collect all item tags currently in this bazaar pull
+        var currentBazaarItems = new HashSet<string>(pull.Products.Select(p => p.ProductId));
+
         // Track the last update time from Kafka
         await Parallel.ForEachAsync(pull.Products, async (product, cancle) =>
         {
@@ -411,6 +415,26 @@ public class OrderBookService
                 await AddOrder(order);
             }
         });
+
+        // Remove items that are no longer in the bazaar
+        var itemsToRemove = lastBazaarItems.Except(currentBazaarItems).ToList();
+        foreach (var itemTag in itemsToRemove)
+        {
+            if (cache.TryRemove(itemTag, out var removedOrderBook))
+            {
+                logger.LogInformation($"order book: Removed all order book entries for {itemTag} - item no longer in bazaar");
+                
+                // Remove all entries from database
+                var allEntries = removedOrderBook.Buy.Union(removedOrderBook.Sell).ToList();
+                foreach (var entry in allEntries)
+                {
+                    await RemoveFromDb(entry);
+                }
+            }
+        }
+
+        // Update last bazaar items for next pull
+        lastBazaarItems = currentBazaarItems;
     }
 
     private async Task DropNotPresent(List<OrderEntry> side, Func<OrderEntry, bool> missingFunc)
