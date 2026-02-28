@@ -64,6 +64,7 @@ namespace Coflnet.Sky.SkyBazaar.Models
         {
             get
             {
+                if (SerialisedBuyOrders == null) return null;
                 return MessagePackSerializer.Deserialize<IEnumerable<BuyOrder>>(SerialisedBuyOrders);
             }
             set
@@ -79,6 +80,7 @@ namespace Coflnet.Sky.SkyBazaar.Models
         {
             get
             {
+                if (SerialisedSellOrders == null) return null;
                 return MessagePackSerializer.Deserialize<IEnumerable<SellOrder>>(SerialisedSellOrders);
             }
             set

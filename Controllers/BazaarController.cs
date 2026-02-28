@@ -106,11 +106,11 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
             {
                 return new GraphResult()
                 {
-                    Buy = a.BuyOrders.FirstOrDefault()?.PricePerUnit ?? a.BuyPrice,
+                    Buy = a.BuyOrders?.FirstOrDefault()?.PricePerUnit ?? a.BuyPrice,
                     MaxBuy = a.MaxBuy,
                     MinBuy = a.MinBuy,
                     MinSell = a.MinSell,
-                    Sell = a.SellOrders.FirstOrDefault()?.PricePerUnit ?? a.SellPrice,
+                    Sell = a.SellOrders?.FirstOrDefault()?.PricePerUnit ?? a.SellPrice,
                     SellVolume = a.SellVolume,
                     BuyVolume = a.BuyVolume,
                     Timestamp = a.TimeStamp,

@@ -396,8 +396,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             var block = (await GetSmalestTable(session).Where(a => a.ProductId == itemId && a.TimeStamp >= detailedStart && a.TimeStamp < detailedEnd).ExecuteAsync())
                         .ToList().Select(qs =>
                         {
-                            qs.BuyPrice = qs.BuyOrders.FirstOrDefault()?.PricePerUnit ?? qs.BuyPrice;
-                            qs.SellPrice = qs.SellOrders.FirstOrDefault()?.PricePerUnit ?? qs.SellPrice;
+                            qs.BuyPrice = qs.BuyOrders?.FirstOrDefault()?.PricePerUnit ?? qs.BuyPrice;
+                            qs.SellPrice = qs.SellOrders?.FirstOrDefault()?.PricePerUnit ?? qs.SellPrice;
                             return qs;
                         });
             if (block.Count() == 0)
