@@ -660,7 +660,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             throw new NotImplementedException("the session should be injected from DI");
         }
 
-        public async Task<IEnumerable<AggregatedQuickStatus>> GetStatus(string productId, DateTime start, DateTime end, int count = 1)
+        public async Task<IEnumerable<AggregatedQuickStatus>> GetStatus(string productId, DateTime start, DateTime end, int count = 1, bool smallestResolution = false, bool includeArchivedOrderbook = false)
         {
             if (end == default)
                 end = DateTime.UtcNow;
@@ -668,6 +668,73 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 start = new DateTime(2020, 3, 10);
             var session = await GetSession();
             var mapper = new Mapper(session);
+
+            if (smallestResolution)
+            {
+                var result = new List<AggregatedQuickStatus>();
+                var limitDate = DateTime.UtcNow - TimeSpan.FromDays(14);
+                
+                DateTime currentEnd = end;
+                int remainingCount = count;
+
+                if (currentEnd > limitDate)
+                {
+                    DateTime secondsStart = start > limitDate ? start : limitDate;
+                    
+                    var secsQuery = await GetSplitSmalestTable(session)
+                        .Where(f => f.ProductId == productId && f.TimeStamp <= currentEnd && f.TimeStamp > secondsStart)
+                        .OrderByDescending(d => d.TimeStamp).Take(remainingCount)
+                        .ExecuteAsync().ConfigureAwait(false);
+                    
+                    var secs = secsQuery.ToList().Select(s => new AggregatedQuickStatus(s)).ToList();
+                    result.AddRange(secs);
+                    
+                    remainingCount -= secs.Count;
+                    currentEnd = limitDate;
+                }
+                
+                if (start < limitDate && remainingCount > 0)
+                {
+                    short quarterEnd = SplitAggregatedQuickStatus.GetQuarterId(currentEnd);
+                    short quarterStart = SplitAggregatedQuickStatus.GetQuarterId(start);
+                    
+                    for (short q = quarterEnd; q >= quarterStart && remainingCount > 0; q--)
+                    {
+                        var qLoadedFlips = await mapper.FetchAsync<SplitAggregatedQuickStatus>("SELECT * FROM " + TABLE_NAME_MINUTES
+                            + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and QuaterId = ? Order by Timestamp DESC LIMIT " + remainingCount, productId, start, currentEnd, q).ConfigureAwait(false);
+                            
+                        var mins = qLoadedFlips.ToList();
+                        result.AddRange(mins);
+                        remainingCount -= mins.Count;
+                    }
+                }
+
+                if (!includeArchivedOrderbook)
+                {
+                    foreach(var s in result) 
+                    {
+                        s.SerialisedBuyOrders = null;
+                        s.SerialisedSellOrders = null;
+                    }
+                }
+
+                if (result.Count == 0 && start > DateTime.UtcNow - TimeSpan.FromMinutes(5))
+                {
+                    var fallbackSecs = currentState.Where(c => c.ProductId == productId).Select(c => new AggregatedQuickStatus(c)).ToList();
+                    if (!includeArchivedOrderbook)
+                    {
+                        foreach(var s in fallbackSecs) 
+                        {
+                            s.SerialisedBuyOrders = null;
+                            s.SerialisedSellOrders = null;
+                        }
+                    }
+                    return fallbackSecs;
+                }
+                LastSuccessfullDB = DateTime.UtcNow;
+                return result;
+            }
+
             string tableName = GetTable(start, end);
             //return await GetSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start).Take(count).ExecuteAsync();
             if (tableName == TABLE_NAME_SECONDS)

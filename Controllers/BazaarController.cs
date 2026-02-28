@@ -53,13 +53,16 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
         /// <param name="itemId"></param>
         /// <param name="start"></param>
         /// <param name="end"></param>
+        /// <param name="smallestResolution"></param>
+        /// <param name="includeArchivedOrderbook"></param>
         /// <returns></returns>
         [Route("{itemId}/data")]
-        [ResponseCache(Duration = 10, Location = ResponseCacheLocation.Any, NoStore = false, VaryByQueryKeys = new string[] { "start", "end" })]
+        [ResponseCache(Duration = 10, Location = ResponseCacheLocation.Any, NoStore = false, VaryByQueryKeys = new string[] { "start", "end", "smallestResolution", "includeArchivedOrderbook" })]
         [HttpGet]
-        public async Task<IEnumerable<SkyBazaar.Models.AggregatedQuickStatus>> GetData(string itemId, DateTime start, DateTime end)
+        public async Task<IEnumerable<SkyBazaar.Models.AggregatedQuickStatus>> GetData(string itemId, DateTime start, DateTime end, bool smallestResolution = false, bool includeArchivedOrderbook = false)
         {
-            var entries = await service.GetStatus(itemId, start, end, 100);
+            var points = smallestResolution ? 3 * 60 * 24 * 30 : 100;
+            var entries = await service.GetStatus(itemId, start, end, points, smallestResolution, includeArchivedOrderbook);
             return entries;
         }
 
@@ -88,13 +91,15 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
         /// <param name="itemId"></param>
         /// <param name="start"></param>
         /// <param name="end"></param>
+        /// <param name="smallestResolution"></param>
         /// <returns></returns>
         [Route("{itemId}/history")]
-        [ResponseCache(Duration = 120, Location = ResponseCacheLocation.Any, NoStore = false, VaryByQueryKeys = new string[] { "start", "end" })]
+        [ResponseCache(Duration = 120, Location = ResponseCacheLocation.Any, NoStore = false, VaryByQueryKeys = new string[] { "start", "end", "smallestResolution" })]
         [HttpGet]
-        public async Task<IEnumerable<GraphResult>> GetHistoryGraph(string itemId, DateTime start, DateTime end)
+        public async Task<IEnumerable<GraphResult>> GetHistoryGraph(string itemId, DateTime start, DateTime end, bool smallestResolution = false)
         {
-            var entries = await service.GetStatus(itemId, start, end, 500);
+            var points = smallestResolution ? 3 * 60 * 24 * 14 : 500;
+            var entries = await service.GetStatus(itemId, start, end, points, smallestResolution);
             var result = entries.ToList();
 
             return result.Select(a =>
