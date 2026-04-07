@@ -181,7 +181,7 @@ public class OrderBookService
                     logger.LogInformation($"Removed outbid sell order for {update.ItemTag} at price {topSellOrder.PricePerUnit} - new:{incomingTopPrice}");
 
                     // Notify user about outbid
-                    await SendUndercutNotification(incomingSellOrders.First(), topSellOrder);
+                    await SendUndercutNotification(topSellOrder, incomingSellOrders.First());
                 }
             }
 
@@ -283,6 +283,13 @@ public class OrderBookService
 
     private async Task SendOutbidNotification(OrderEntry newOrder, OrderEntry outbid)
     {
+        // Skip notification if the outbid order doesn't have a valid UserId
+        if (string.IsNullOrEmpty(outbid.UserId))
+        {
+            logger.LogWarning($"order book: Skipping outbid notification - outbid order has no UserId for {newOrder.ItemId}");
+            return;
+        }
+
         var gray = "§7";
         var green = "§a";
         var red = "§c";
@@ -309,6 +316,13 @@ public class OrderBookService
 
     private async Task SendUndercutNotification(OrderEntry existingOrder, OrderEntry undercuttingOrder)
     {
+        // Skip notification if the existing order doesn't have a valid UserId
+        if (string.IsNullOrEmpty(existingOrder.UserId))
+        {
+            logger.LogWarning($"order book: Skipping undercut notification - existing order has no UserId for {existingOrder.ItemId}");
+            return;
+        }
+
         var gray = "§7";
         var green = "§a";
         var red = "§c";
