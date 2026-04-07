@@ -5,6 +5,7 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <ErrorOnDuplicatePublishOutputFiles>false</ErrorOnDuplicatePublishOutputFiles>
     <GenerateProgramFile>false</GenerateProgramFile>
+    <StartupObject>Coflnet.Sky.SkyAuctionTracker.Program</StartupObject>
   </PropertyGroup>
 
   <ItemGroup>
