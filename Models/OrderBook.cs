@@ -87,7 +87,19 @@ public class OrderBook
     internal bool Remove(OrderEntry order)
     {
         var side = order.IsSell ? this.Sell : this.Buy;
-        var onBook = side.Where(o => o.Timestamp == order.Timestamp && o.PlayerName != null).FirstOrDefault();
+        var onBook = side.FirstOrDefault(o => o.Timestamp == order.Timestamp
+            && o.ItemId == order.ItemId
+            && o.IsSell == order.IsSell
+            && o.UserId == order.UserId);
+
+        if (onBook == null)
+        {
+            onBook = side.FirstOrDefault(o => o.Timestamp == order.Timestamp
+                && o.ItemId == order.ItemId
+                && o.IsSell == order.IsSell
+                && Math.Round(o.PricePerUnit, 1) == Math.Round(order.PricePerUnit, 1));
+        }
+
         return side.Remove(onBook);
 
     }

@@ -430,7 +430,7 @@ public class OrderBookServiceTests
     // Tests for UpdateOrderBook method
 
     [Test]
-    public async Task UpdateOrderBook_BuyOrderUndercut_ShouldNotifyAndRemove()
+    public async Task UpdateOrderBook_BuyOrderOutbid_ShouldNotifyTrackedOrder()
     {
         itemsApiMock.Setup(i => i.ItemNamesGetAsync(0, default)).ReturnsAsync(new List<Items.Client.Model.ItemPreview>() { new() { Tag = "DIAMOND", Name = "Diamond" } });
         
@@ -448,14 +448,14 @@ public class OrderBookServiceTests
         
         await orderBookService.AddOrder(topBuyOrder);
 
-        // Update with lower price buy orders (undercut scenario)
+        // Update with a higher top buy order, which should outbid the tracked order.
         var update = new OrderBookUpdate()
         {
             ItemTag = "DIAMOND",
             Timestamp = DateTime.UtcNow,
             BuyOrders = new List<OrderEntry>
             {
-                new() { Amount = 5, PricePerUnit = 99, IsSell = false }, // Undercutting order
+                new() { Amount = 5, PricePerUnit = 101, IsSell = false },
                 new() { Amount = 3, PricePerUnit = 98, IsSell = false }
             }
         };
@@ -466,11 +466,11 @@ public class OrderBookServiceTests
         
         // Verify notification was sent
         messageApiMock.Verify(m => m.MessageSendUserIdPostAsync("user1", It.Is<MessageContainer>(m => 
-            m.Message != null && System.Text.RegularExpressions.Regex.Replace(m.Message, "§.", "").Contains("undercut")), 0, default), Times.Once);
+            m.Message != null && System.Text.RegularExpressions.Regex.Replace(m.Message, "§.", "").Contains("outbid")), 0, default), Times.Once);
     }
 
     [Test]
-    public async Task UpdateOrderBook_SellOrderOutbid_ShouldNotifyAndRemove()
+    public async Task UpdateOrderBook_SellOrderUndercut_ShouldNotifyTrackedOrder()
     {
         itemsApiMock.Setup(i => i.ItemNamesGetAsync(0, default)).ReturnsAsync(new List<Items.Client.Model.ItemPreview>() { new() { Tag = "EMERALD", Name = "Emerald" } });
         
@@ -488,14 +488,14 @@ public class OrderBookServiceTests
         
         await orderBookService.AddOrder(topSellOrder);
 
-        // Update with higher price sell orders (outbid scenario)
+        // Update with a lower top sell order, which should undercut the tracked order.
         var update = new OrderBookUpdate()
         {
             ItemTag = "EMERALD",
             Timestamp = DateTime.UtcNow,
             SellOrders = new List<OrderEntry>
             {
-                new() { Amount = 5, PricePerUnit = 51, IsSell = true }, // Outbidding order
+                new() { Amount = 5, PricePerUnit = 49, IsSell = true },
                 new() { Amount = 3, PricePerUnit = 52, IsSell = true }
             }
         };
@@ -504,8 +504,40 @@ public class OrderBookServiceTests
 
         Assert.That(result, Is.True, "Update should be accepted");
         
-        // Verify notification was sent (looking for the generic outbid notification message)
-        messageApiMock.Verify(m => m.MessageSendUserIdPostAsync("user2", It.IsAny<MessageContainer>(), 0, default), Times.Once);
+        messageApiMock.Verify(m => m.MessageSendUserIdPostAsync("user2", It.Is<MessageContainer>(m => 
+            m.Message != null && System.Text.RegularExpressions.Regex.Replace(m.Message, "§.", "").Contains("Your sell-order for 10x Emerald has been undercut")), 0, default), Times.Once);
+    }
+
+    [Test]
+    public void Remove_ShouldHandleTrackedOrdersWithoutPlayerName()
+    {
+        var orderBook = new OrderBook();
+        var trackedOrder = new OrderEntry()
+        {
+            Amount = 20000,
+            IsSell = false,
+            ItemId = "SEEDS",
+            PlayerName = null,
+            PricePerUnit = 1.1,
+            Timestamp = new DateTime(2026, 4, 8, 15, 53, 11, DateTimeKind.Utc),
+            UserId = "7"
+        };
+
+        orderBook.Buy.Add(trackedOrder);
+
+        var removed = orderBook.Remove(new OrderEntry()
+        {
+            Amount = 1,
+            IsSell = false,
+            ItemId = "SEEDS",
+            PlayerName = "Ekwav",
+            PricePerUnit = 1.1,
+            Timestamp = trackedOrder.Timestamp,
+            UserId = "7"
+        });
+
+        Assert.That(removed, Is.True);
+        Assert.That(orderBook.Buy, Is.Empty);
     }
 
     [Test]

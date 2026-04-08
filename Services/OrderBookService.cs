@@ -103,7 +103,7 @@ public class OrderBookService
                     logger.LogInformation($"Removed extra buy order for {update.ItemTag} at price {topBuyOrder.PricePerUnit} - new:{incomingTopPrice}");
 
                     // Notify user about undercut
-                    await SendOutbidNotification(topBuyOrder, incomingBuyOrders.First());
+                    await SendOutbidNotification(incomingBuyOrders.First(), topBuyOrder);
                 }
             }
 
@@ -327,6 +327,7 @@ public class OrderBookService
         var green = "§a";
         var red = "§c";
         var aqua = "§b";
+        var kind = existingOrder.IsSell ? "sell" : "buy";
         var names = await itemsApi.ItemNamesGetAsync();
         var name = names?.Where(n => n.Tag == existingOrder.ItemId).FirstOrDefault()?.Name;
         var differenceAmount = Math.Round(Math.Abs(existingOrder.PricePerUnit - undercuttingOrder.PricePerUnit), 1);
@@ -334,7 +335,7 @@ public class OrderBookService
         await messageApi.MessageSendUserIdPostAsync(existingOrder.UserId, new()
         {
             Summary = "Your order was undercut",
-            Message = $"{gray}Your {green}buy{gray}-order for {aqua}{existingOrder.Amount:N0}x {name ?? "item"}{gray} has been {red}undercut{gray} by an order of {aqua}{undercuttingOrder.Amount:N0}x{gray} "
+            Message = $"{gray}Your {green}{kind}{gray}-order for {aqua}{existingOrder.Amount:N0}x {name ?? "item"}{gray} has been {red}undercut{gray} by an order of {aqua}{undercuttingOrder.Amount:N0}x{gray} "
              + $"at {green}{Math.Round(undercuttingOrder.PricePerUnit, 1):N1}{gray} per unit ({red}-{differenceAmount.ToString("N1")}{gray}).",
             Reference = $"{existingOrder.Amount:N0}{existingOrder.ItemId}{Math.Round(existingOrder.PricePerUnit, 1):N1}{existingOrder.Timestamp.Ticks}".Truncate(32),
             SourceType = "bazaar",
