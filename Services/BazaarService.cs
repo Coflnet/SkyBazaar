@@ -33,6 +33,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         private const string TABLE_NAME_RECENT_HOURLY = "QuickStatusRecent3";
         private const string TABLE_NAME_MINUTES = "QuickStatusMin";
         private const string TABLE_NAME_SECONDS = "QuickStatusSeconds";
+        private const int RECENT_HOURS_PAGE_SIZE = 512;
         private const string DEFAULT_ITEM_TAG = "STOCK_OF_STONKS";
         private static bool ranCreate;
         public DateTime LastSuccessfullDB { get; private set; }
@@ -622,6 +623,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             {
                 var maxTries = 7;
                 var statement = new BatchStatement();
+                statement.SetBatchType(BatchType.Unlogged);
                 foreach (var item in status)
                 {
                     statement.Add(table.Insert(item));
@@ -666,6 +668,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 end = DateTime.UtcNow;
             if (start == default)
                 start = new DateTime(2020, 3, 10);
+            count = Math.Max(count, 1);
             var session = await GetSession();
             var mapper = new Mapper(session);
 
@@ -751,10 +754,10 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             }
             if (tableName == TABLE_NAME_DAILY_NEW)
                 return await mapper.FetchAsync<AggregatedQuickStatus>("SELECT * FROM " + tableName
-                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? Order by Timestamp DESC", productId, start, end).ConfigureAwait(false);
+                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? Order by Timestamp DESC LIMIT " + count, productId, start, end).ConfigureAwait(false);
             var quarterId = SplitAggregatedQuickStatus.GetQuarterId(end);
             var loadedFlip = await mapper.FetchAsync<SplitAggregatedQuickStatus>("SELECT * FROM " + tableName
-                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and QuaterId = ? Order by Timestamp DESC", productId, start, end, quarterId).ConfigureAwait(false);
+                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and QuaterId = ? Order by Timestamp DESC LIMIT " + count, productId, start, end, quarterId).ConfigureAwait(false);
             return loadedFlip.ToList();
         }
 
@@ -770,16 +773,38 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             return TABLE_NAME_DAILY; // one daily
         }
 
+        private static async Task<List<AggregatedQuickStatus>> LoadRecentHoursPartition(Table<AggregatedQuickStatus> table, DateTime start)
+        {
+            var results = new List<AggregatedQuickStatus>();
+            byte[] pagingState = null;
+
+            do
+            {
+                var query = table.Where(t => t.TimeStamp == start);
+                query.SetPageSize(RECENT_HOURS_PAGE_SIZE);
+                query.SetAutoPage(false);
+                if (pagingState != null && pagingState.Length != 0)
+                    query.SetPagingState(pagingState);
+
+                var page = await query.ExecutePagedAsync().ConfigureAwait(false);
+                results.AddRange(page);
+                pagingState = page.PagingState;
+            }
+            while (pagingState != null && pagingState.Length != 0);
+
+            return results;
+        }
+
         internal async Task<IEnumerable<ItemPriceMovement>> GetMovement(int hours, bool usebuyOrders)
         {
             var table = RecentHoursTable(await GetSession());
             var start = (DateTime.UtcNow - TimeSpan.FromHours(hours)).RoundDown(TimeSpan.FromHours(2)); // hourly view is saved every 2 hours
-            var prices = (await table.Where(t => t.TimeStamp == start).ExecuteAsync()).ToList();
+            var prices = await LoadRecentHoursPartition(table, start);
             if (prices.Count() == 0)
             {
                 // try with more recent data
                 start = (DateTime.UtcNow - TimeSpan.FromHours(hours - 2)).RoundDown(TimeSpan.FromHours(2));
-                prices = (await table.Where(t => t.TimeStamp == start).ExecuteAsync()).ToList();
+                prices = await LoadRecentHoursPartition(table, start);
             }
             var currentLookup = currentState.GroupBy(c=>c.ProductId).Select(g=>g.First()).ToDictionary(c => c.ProductId, c => c);
             return prices
