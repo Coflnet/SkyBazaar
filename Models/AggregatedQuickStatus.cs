@@ -27,6 +27,32 @@ namespace Coflnet.Sky.SkyBazaar.Models
             return (short)((timestamp - epoch).TotalDays / 90);
         }
     }
+
+    public class FifteenDayAggregatedQuickStatus : AggregatedQuickStatus
+    {
+        public const int BucketLengthDays = 15;
+        public int BucketId { get; set; }
+
+        public FifteenDayAggregatedQuickStatus(AggregatedQuickStatus status) : base(status)
+        {
+            MaxBuy = status.MaxBuy;
+            MaxSell = status.MaxSell;
+            MinBuy = status.MinBuy;
+            MinSell = status.MinSell;
+            Count = status.Count;
+            BucketId = GetBucketId(status.TimeStamp);
+        }
+
+        public FifteenDayAggregatedQuickStatus()
+        {
+        }
+
+        public static int GetBucketId(DateTime timestamp)
+        {
+            return (int)((timestamp - SplitAggregatedQuickStatus.epoch).TotalDays / BucketLengthDays);
+        }
+    }
+
     /// <summary>
     /// Special version of 
     /// </summary>

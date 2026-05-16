@@ -31,7 +31,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         private const string TABLE_NAME_DAILY = "QuickStatusDaly";
         private const string TABLE_NAME_HOURLY = "QuickStatusHourly";
         private const string TABLE_NAME_RECENT_HOURLY = "QuickStatusRecent3";
-        private const string TABLE_NAME_MINUTES = "QuickStatusMin";
+        private const string TABLE_NAME_MINUTES_LEGACY = "QuickStatusMin";
+        private const string TABLE_NAME_MINUTES = "QuickStatusMin15Day";
         private const string TABLE_NAME_SECONDS = "QuickStatusSeconds";
         private const int RECENT_HOURS_PAGE_SIZE = 512;
         private const string DEFAULT_ITEM_TAG = "STOCK_OF_STONKS";
@@ -338,7 +339,36 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
         private static async Task AggregateMinutes(ISession session, DateTime startDate, TimeSpan length, string itemId, DateTime endDate)
         {
-            await AggregateMinutesData(session, startDate, length, itemId, GetSplitMinutesTable(session), CreateBlock, TimeSpan.FromMinutes(5), 29, endDate);
+            if (endDate == default)
+                endDate = DateTime.UtcNow;
+            var minuteTable = GetSplitMinutesTable(session);
+            for (var start = startDate; start + length < endDate; start += length)
+            {
+                var end = start + length;
+                var existing = await LoadMinuteAggregateRange(minuteTable, itemId, start - TimeSpan.FromMinutes(5), end).ConfigureAwait(false);
+                var lookup = existing.GroupBy(e => e.TimeStamp.RoundDown(TimeSpan.FromMinutes(5))).Select(e => e.First()).ToDictionary(e => e.TimeStamp.RoundDown(TimeSpan.FromMinutes(5)));
+                var addCount = 0;
+                var skipped = 0;
+                var lineMinCount = start < new DateTime(2022, 1, 1) ? 1 : 29;
+                for (var detailedStart = start; detailedStart < end; detailedStart += TimeSpan.FromMinutes(5))
+                {
+                    if (lookup.TryGetValue(detailedStart.RoundDown(TimeSpan.FromMinutes(5)), out FifteenDayAggregatedQuickStatus sum) && sum.Count >= lineMinCount)
+                    {
+                        skipped++;
+                        continue;
+                    }
+
+                    var detailedEnd = detailedStart + TimeSpan.FromMinutes(5);
+                    var result = await CreateBlock(session, itemId, detailedStart, detailedEnd).ConfigureAwait(false);
+                    if (result == null)
+                        continue;
+                    await session.ExecuteAsync(minuteTable.Insert(result)).ConfigureAwait(false);
+                    addCount += result.Count;
+                }
+                if (length < TimeSpan.FromMinutes(10) && Random.Shared.NextDouble() > 0.1)
+                    continue;
+                Console.WriteLine($"checked {start} {minuteTable.Name} {itemId} {addCount}\t{skipped}");
+            }
         }
 
         private static async Task<string[]> GetAllItemIds()
@@ -392,7 +422,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             Console.WriteLine($"checked {start} {minTable.Name} {itemId} {addCount}\t{skipped}");
         }
 
-        private static async Task<SplitAggregatedQuickStatus> CreateBlock(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd)
+        private static async Task<FifteenDayAggregatedQuickStatus> CreateBlock(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd)
         {
             var block = (await GetSmalestTable(session).Where(a => a.ProductId == itemId && a.TimeStamp >= detailedStart && a.TimeStamp < detailedEnd).ExecuteAsync())
                         .ToList().Select(qs =>
@@ -409,7 +439,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             result.MinBuy = (float)block.Min(b => b.BuyPrice);
             result.MinSell = (float)block.Min(b => b.SellPrice);
             result.Count = (short)block.Count();
-            return new(result);
+            return new FifteenDayAggregatedQuickStatus(result);
         }
         private static async Task<SplitAggregatedQuickStatus> CreateBlockAggregated(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd, Table<SplitAggregatedQuickStatus> startingTable)
         {
@@ -426,6 +456,96 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 Count = (short)block.Sum(b => b.Count)
             };
             return new(result);
+        }
+
+        private static async Task<SplitAggregatedQuickStatus> CreateBlockAggregated(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd, Table<FifteenDayAggregatedQuickStatus> startingTable)
+        {
+            var block = await LoadMinuteAggregateRange(startingTable, itemId, detailedStart, detailedEnd).ConfigureAwait(false);
+            if (block.Count == 0)
+                return await CreateBlockAggregated(session, itemId, detailedStart, detailedEnd, GetLegacySplitMinutesTable(session)).ConfigureAwait(false);
+            var result = new AggregatedQuickStatus(block.First())
+            {
+                MaxBuy = (float)block.Max(b => b.MaxBuy),
+                MaxSell = (float)block.Max(b => b.MaxSell),
+                MinBuy = (float)block.Min(b => b.MinBuy),
+                MinSell = (float)block.Min(b => b.MinSell),
+                Count = (short)block.Sum(b => b.Count)
+            };
+            return new SplitAggregatedQuickStatus(result);
+        }
+
+        private static IEnumerable<int> GetFifteenDayBucketIdsDescending(DateTime start, DateTime end)
+        {
+            var bucketStart = FifteenDayAggregatedQuickStatus.GetBucketId(start);
+            var bucketEnd = FifteenDayAggregatedQuickStatus.GetBucketId(end.AddTicks(-1));
+            for (var bucket = bucketEnd; bucket >= bucketStart; bucket--)
+                yield return bucket;
+        }
+
+        private static IEnumerable<short> GetQuarterIdsDescending(DateTime start, DateTime end)
+        {
+            var quarterStart = SplitAggregatedQuickStatus.GetQuarterId(start);
+            var quarterEnd = SplitAggregatedQuickStatus.GetQuarterId(end.AddTicks(-1));
+            for (var quarter = quarterEnd; quarter >= quarterStart; quarter--)
+                yield return (short)quarter;
+        }
+
+        private static async Task<List<FifteenDayAggregatedQuickStatus>> LoadMinuteAggregateRange(Table<FifteenDayAggregatedQuickStatus> minuteTable, string itemId, DateTime start, DateTime end)
+        {
+            var results = new List<FifteenDayAggregatedQuickStatus>();
+            foreach (var bucketId in GetFifteenDayBucketIdsDescending(start, end))
+            {
+                var bucketRows = await minuteTable.Where(a => a.ProductId == itemId && a.TimeStamp >= start && a.TimeStamp < end && a.BucketId == bucketId)
+                    .ExecuteAsync().ConfigureAwait(false);
+                results.AddRange(bucketRows);
+            }
+            return results;
+        }
+
+        private static void MergeHistoryResults<T>(List<AggregatedQuickStatus> target, IEnumerable<T> source, int count)
+            where T : AggregatedQuickStatus
+        {
+            var seen = target.Select(s => s.TimeStamp).ToHashSet();
+            foreach (var row in source.OrderByDescending(s => s.TimeStamp))
+            {
+                if (!seen.Add(row.TimeStamp))
+                    continue;
+                target.Add(row);
+                if (target.Count >= count)
+                    break;
+            }
+            target.Sort((left, right) => right.TimeStamp.CompareTo(left.TimeStamp));
+            if (target.Count > count)
+                target.RemoveRange(count, target.Count - count);
+        }
+
+        private static async Task<List<AggregatedQuickStatus>> LoadMinuteHistory(ISession session, string productId, DateTime start, DateTime end, int count)
+        {
+            var mapper = new Mapper(session);
+            var results = new List<AggregatedQuickStatus>();
+            foreach (var bucketId in GetFifteenDayBucketIdsDescending(start, end))
+            {
+                if (results.Count >= count)
+                    break;
+                var remaining = count - results.Count;
+                var loaded = await mapper.FetchAsync<FifteenDayAggregatedQuickStatus>("SELECT * FROM " + TABLE_NAME_MINUTES
+                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and BucketId = ? Order by Timestamp DESC LIMIT " + remaining,
+                    productId, start, end, bucketId).ConfigureAwait(false);
+                MergeHistoryResults(results, loaded, count);
+            }
+
+            foreach (var quarterId in GetQuarterIdsDescending(start, end))
+            {
+                if (results.Count >= count)
+                    break;
+                var remaining = count - results.Count;
+                var loaded = await mapper.FetchAsync<SplitAggregatedQuickStatus>("SELECT * FROM " + TABLE_NAME_MINUTES_LEGACY
+                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and QuaterId = ? Order by Timestamp DESC LIMIT " + remaining,
+                    productId, start, end, quarterId).ConfigureAwait(false);
+                MergeHistoryResults(results, loaded, count);
+            }
+
+            return results;
         }
 
         private static Expression<Func<SplitAggregatedQuickStatus, bool>> SelectExpression(string itemId, DateTime start, DateTime end)
@@ -518,7 +638,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
         public static Table<AggregatedQuickStatus> GetMinutesTable(ISession session)
         {
-            return new Table<AggregatedQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_MINUTES);
+            return new Table<AggregatedQuickStatus>(session, new MappingConfiguration(), TABLE_NAME_MINUTES_LEGACY);
         }
 
         public static Table<StorageQuickStatus> GetSmalestTable(ISession session)
@@ -551,7 +671,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             );
             return new Table<AggregatedQuickStatus>(session, mapping, TABLE_NAME_RECENT_HOURLY);
         }
-        public static Table<SplitAggregatedQuickStatus> GetSplitMinutesTable(ISession session)
+        public static Table<SplitAggregatedQuickStatus> GetLegacySplitMinutesTable(ISession session)
         {
             var mapping = new MappingConfiguration().Define(
                 new Map<SplitAggregatedQuickStatus>()
@@ -559,9 +679,22 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     .ClusteringKey(f => f.TimeStamp)
                     .Column(f => f.BuyOrders, cm => cm.Ignore())
                     .Column(f => f.SellOrders, cm => cm.Ignore())
+                    .TableName(TABLE_NAME_MINUTES_LEGACY)
+            );
+            return new Table<SplitAggregatedQuickStatus>(session, mapping, TABLE_NAME_MINUTES_LEGACY);
+        }
+
+        public static Table<FifteenDayAggregatedQuickStatus> GetSplitMinutesTable(ISession session)
+        {
+            var mapping = new MappingConfiguration().Define(
+                new Map<FifteenDayAggregatedQuickStatus>()
+                    .PartitionKey(f => f.ProductId, f => f.BucketId)
+                    .ClusteringKey(f => f.TimeStamp)
+                    .Column(f => f.BuyOrders, cm => cm.Ignore())
+                    .Column(f => f.SellOrders, cm => cm.Ignore())
                     .TableName(TABLE_NAME_MINUTES)
             );
-            return new Table<SplitAggregatedQuickStatus>(session, mapping, TABLE_NAME_MINUTES);
+            return new Table<FifteenDayAggregatedQuickStatus>(session, mapping, TABLE_NAME_MINUTES);
         }
 
         public static Table<StorageQuickStatus> GetSplitSmalestTable(ISession session)
@@ -698,18 +831,9 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 
                 if (start < limitDate && remainingCount > 0)
                 {
-                    short quarterEnd = SplitAggregatedQuickStatus.GetQuarterId(currentEnd);
-                    short quarterStart = SplitAggregatedQuickStatus.GetQuarterId(start);
-                    
-                    for (short q = quarterEnd; q >= quarterStart && remainingCount > 0; q--)
-                    {
-                        var qLoadedFlips = await mapper.FetchAsync<SplitAggregatedQuickStatus>("SELECT * FROM " + TABLE_NAME_MINUTES
-                            + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and QuaterId = ? Order by Timestamp DESC LIMIT " + remainingCount, productId, start, currentEnd, q).ConfigureAwait(false);
-                            
-                        var mins = qLoadedFlips.ToList();
-                        result.AddRange(mins);
-                        remainingCount -= mins.Count;
-                    }
+                    var mins = await LoadMinuteHistory(session, productId, start, currentEnd, remainingCount).ConfigureAwait(false);
+                    result.AddRange(mins);
+                    remainingCount -= mins.Count;
                 }
 
                 if (!includeArchivedOrderbook)
@@ -755,6 +879,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             if (tableName == TABLE_NAME_DAILY_NEW)
                 return await mapper.FetchAsync<AggregatedQuickStatus>("SELECT * FROM " + tableName
                     + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? Order by Timestamp DESC LIMIT " + count, productId, start, end).ConfigureAwait(false);
+            if (tableName == TABLE_NAME_MINUTES)
+                return await LoadMinuteHistory(session, productId, start, end, count).ConfigureAwait(false);
             var quarterId = SplitAggregatedQuickStatus.GetQuarterId(end);
             var loadedFlip = await mapper.FetchAsync<SplitAggregatedQuickStatus>("SELECT * FROM " + tableName
                     + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and QuaterId = ? Order by Timestamp DESC LIMIT " + count, productId, start, end, quarterId).ConfigureAwait(false);
