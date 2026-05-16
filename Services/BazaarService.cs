@@ -41,10 +41,22 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         private IConfiguration config;
         private ILogger<BazaarService> logger;
         ISession _session;
+        private readonly IBlobHistoryStore blobStore;
+        private readonly int retentionHotDays;
+        private readonly bool legacyMinuteTableDropped;
         /// <summary>
         /// <inheritdoc/>
         /// </summary>
         public ISession Session => _session;
+
+        /// <summary>
+        /// Snapshot of distinct product ids currently tracked in live state. Used by the
+        /// history archive service to enumerate items without a separate API call.
+        /// </summary>
+        public IReadOnlyList<string> GetKnownProductIds()
+        {
+            return currentState.Select(s => s.ProductId).Where(p => !string.IsNullOrEmpty(p)).Distinct().ToList();
+        }
 
         private static Prometheus.Counter insertCount = Prometheus.Metrics.CreateCounter("sky_bazaar_status_insert", "How many inserts were made");
         private static Prometheus.Counter insertFailed = Prometheus.Metrics.CreateCounter("sky_bazaar_status_insert_failed", "How many inserts failed");
@@ -72,11 +84,17 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 }
             );
 
-        public BazaarService(IConfiguration config, ILogger<BazaarService> logger, ISession session)
+        public BazaarService(IConfiguration config, ILogger<BazaarService> logger, ISession session, IBlobHistoryStore blobStore = null)
         {
             this.config = config;
             this.logger = logger;
             _session = session;
+            this.blobStore = blobStore;
+            if (!int.TryParse(config["HISTORY_ARCHIVE:RETENTION_HOT_DAYS"], out retentionHotDays) || retentionHotDays <= 0)
+                retentionHotDays = 30;
+            // When the legacy QuickStatusMin table has been (or will be) dropped, the read path
+            // must stop hitting it. Flag is set in config; matches HistoryArchiveService's drop guard.
+            legacyMinuteTableDropped = bool.TryParse(config["HISTORY_ARCHIVE:DROP_LEGACY_TABLE"], out var dropped) && dropped;
         }
 
         internal async Task NewPull(int i, BazaarPull bazaar)
@@ -519,7 +537,21 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 target.RemoveRange(count, target.Count - count);
         }
 
-        private static async Task<List<AggregatedQuickStatus>> LoadMinuteHistory(ISession session, string productId, DateTime start, DateTime end, int count)
+        private static IEnumerable<int> GetThirtyDayArchiveBucketIdsDescending(DateTime start, DateTime end)
+        {
+            if (end <= start)
+                yield break;
+            var bucketStart = ArchivedMinuteBlock.GetBucketId(start);
+            // Use end (not end-1tick) so that when `end` is exactly aligned to a 30-day
+            // bucket boundary, we still iterate the bucket that owns the boundary row
+            // (a row exactly at `end` matches the `<= end` read filter and lives in the
+            // higher-numbered bucket per the archive convention `>= bucketStart && < bucketEnd`).
+            var bucketEnd = ArchivedMinuteBlock.GetBucketId(end);
+            for (var bucket = bucketEnd; bucket >= bucketStart; bucket--)
+                yield return bucket;
+        }
+
+        private async Task<List<AggregatedQuickStatus>> LoadMinuteHistory(ISession session, string productId, DateTime start, DateTime end, int count)
         {
             var mapper = new Mapper(session);
             var results = new List<AggregatedQuickStatus>();
@@ -534,10 +566,39 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 MergeHistoryResults(results, loaded, count);
             }
 
+            // Cold tier (S3) for time ranges that fall outside the hot-tier retention window.
+            if (blobStore != null && blobStore.IsEnabled)
+            {
+                var coldCutoff = DateTime.UtcNow.AddDays(-retentionHotDays);
+                if (start < coldCutoff)
+                {
+                    var coldEnd = end < coldCutoff ? end : coldCutoff;
+                    foreach (var bucketId in GetThirtyDayArchiveBucketIdsDescending(start, coldEnd))
+                    {
+                        if (results.Count >= count)
+                            break;
+                        try
+                        {
+                            var block = await blobStore.ReadBlobAsync(productId, bucketId).ConfigureAwait(false);
+                            if (block == null)
+                                continue;
+                            var rows = block.ToRows().Where(r => r.TimeStamp > start && r.TimeStamp <= end);
+                            MergeHistoryResults(results, rows, count);
+                        }
+                        catch (Exception ex)
+                        {
+                            logger?.LogWarning(ex, "Cold-tier read failed for {Product} bucket {Bucket}; falling back to legacy table.", productId, bucketId);
+                        }
+                    }
+                }
+            }
+
             foreach (var quarterId in GetQuarterIdsDescending(start, end))
             {
                 if (results.Count >= count)
                     break;
+                if (legacyMinuteTableDropped)
+                    break; // Legacy table no longer exists; do not issue queries against it.
                 var remaining = count - results.Count;
                 var loaded = await mapper.FetchAsync<SplitAggregatedQuickStatus>("SELECT * FROM " + TABLE_NAME_MINUTES_LEGACY
                     + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and QuaterId = ? Order by Timestamp DESC LIMIT " + remaining,

@@ -65,6 +65,9 @@ namespace Coflnet.Sky.SkyAuctionTracker
             services.AddMemoryCache();
             services.AddSingleton(d => ConnectionMultiplexer.Connect(Configuration["SETTINGS_REDIS_HOST"]));
             services.AddSingleton<OrderBookService>();
+            services.AddSingleton<IBlobHistoryStore, S3BlobHistoryStore>();
+            if (bool.TryParse(Configuration["HISTORY_ARCHIVE:ENABLED"], out var archiveEnabled) && archiveEnabled)
+                services.AddHostedService<HistoryArchiveService>();
             // Run a small migration on startup to ensure the new column exists
             services.AddHostedService<Services.Migrations.AddHasBeenNotifiedMigration>();
             services.AddSingleton<ISessionContainer>(d => d.GetRequiredService<BazaarService>());
