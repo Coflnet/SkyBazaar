@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using Coflnet.Sky.SkyBazaar.Models;
 using MessagePack;
+using Newtonsoft.Json;
 using NUnit.Framework;
 
 namespace Coflnet.Sky.SkyAuctionTracker.Services
@@ -36,6 +39,99 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             Run(rawMsgpack, "Brotli Fastest",        s => new BrotliStream(s, CompressionLevel.Fastest, leaveOpen: true),        s => new BrotliStream(s, CompressionMode.Decompress));
             Run(rawMsgpack, "Brotli Optimal",        s => new BrotliStream(s, CompressionLevel.Optimal, leaveOpen: true),        s => new BrotliStream(s, CompressionMode.Decompress));
             Run(rawMsgpack, "Brotli SmallestSize",   s => new BrotliStream(s, CompressionLevel.SmallestSize, leaveOpen: true),   s => new BrotliStream(s, CompressionMode.Decompress));
+        }
+
+        [Test, Explicit("Benchmark only \u2014 run with: dotnet test --filter FullyQualifiedName~CompressionBenchmark")]
+        public void CompareAlgorithms_CookieDataset()
+        {
+            // Uses the real cookie.json sample (~25h of BOOSTER_COOKIE snapshots) as a representative
+            // dataset. We discard order books (the cold-tier archive only stores aggregated fields)
+            // and pack the remaining snapshots into a single ArchivedMinuteBlock to measure how
+            // each algorithm performs on real-world field distributions.
+            var path = LocateCookieJson();
+            if (path == null)
+            {
+                Assert.Ignore("cookie.json not found in repo root or working directory; skipping real-data benchmark.");
+                return;
+            }
+            var snapshots = JsonConvert.DeserializeObject<List<CookieRow>>(File.ReadAllText(path));
+            Assert.That(snapshots, Is.Not.Null.And.Not.Empty, "cookie.json deserialized to empty list");
+            snapshots = snapshots.OrderBy(s => s.TimeStamp).ToList();
+
+            var rows = snapshots.Select(s => new AggregatedQuickStatus
+            {
+                ProductId = s.ProductId,
+                TimeStamp = s.TimeStamp,
+                BuyPrice = s.BuyPrice,
+                SellPrice = s.SellPrice,
+                BuyVolume = s.BuyVolume,
+                SellVolume = s.SellVolume,
+                BuyMovingWeek = s.BuyMovingWeek,
+                SellMovingWeek = s.SellMovingWeek,
+                BuyOrdersCount = s.BuyOrdersCount,
+                SellOrdersCount = s.SellOrdersCount,
+                MaxBuy = (float)s.BuyPrice,
+                MaxSell = (float)s.SellPrice,
+                MinBuy = (float)s.BuyPrice,
+                MinSell = (float)s.SellPrice,
+                Count = 1,
+            }).ToList();
+
+            var productId = rows[0].ProductId ?? "BOOSTER_COOKIE";
+            var bucketId = ArchivedMinuteBlock.GetBucketId(rows[0].TimeStamp);
+            var block = ArchivedMinuteBlock.FromRows(productId, bucketId, rows);
+            using var msgpackStream = new MemoryStream();
+            MessagePackSerializer.Serialize(msgpackStream, block);
+            var rawMsgpack = msgpackStream.ToArray();
+
+            var span = rows[^1].TimeStamp - rows[0].TimeStamp;
+            TestContext.Out.WriteLine($"Source               : {path}");
+            TestContext.Out.WriteLine($"Product              : {productId}");
+            TestContext.Out.WriteLine($"Rows                 : {rows.Count}");
+            TestContext.Out.WriteLine($"Time span            : {span}");
+            TestContext.Out.WriteLine($"MessagePack raw size : {rawMsgpack.Length,10} bytes ({rawMsgpack.Length / (double)rows.Count,5:F1} B/row)");
+            TestContext.Out.WriteLine($"{"Algorithm",-32} {"Size",10}  {"Ratio",8}  {"Encode",10}  {"Decode",10}");
+            TestContext.Out.WriteLine(new string('-', 78));
+
+            Run(rawMsgpack, "Deflate Optimal",       s => new DeflateStream(s, CompressionLevel.Optimal, leaveOpen: true),       s => new DeflateStream(s, CompressionMode.Decompress));
+            Run(rawMsgpack, "Deflate SmallestSize",  s => new DeflateStream(s, CompressionLevel.SmallestSize, leaveOpen: true),  s => new DeflateStream(s, CompressionMode.Decompress));
+            Run(rawMsgpack, "Gzip Optimal",          s => new GZipStream(s, CompressionLevel.Optimal, leaveOpen: true),          s => new GZipStream(s, CompressionMode.Decompress));
+            Run(rawMsgpack, "Gzip SmallestSize",     s => new GZipStream(s, CompressionLevel.SmallestSize, leaveOpen: true),     s => new GZipStream(s, CompressionMode.Decompress));
+            Run(rawMsgpack, "Brotli Fastest",        s => new BrotliStream(s, CompressionLevel.Fastest, leaveOpen: true),        s => new BrotliStream(s, CompressionMode.Decompress));
+            Run(rawMsgpack, "Brotli Optimal",        s => new BrotliStream(s, CompressionLevel.Optimal, leaveOpen: true),        s => new BrotliStream(s, CompressionMode.Decompress));
+            Run(rawMsgpack, "Brotli SmallestSize",   s => new BrotliStream(s, CompressionLevel.SmallestSize, leaveOpen: true),   s => new BrotliStream(s, CompressionMode.Decompress));
+        }
+
+        private static string LocateCookieJson()
+        {
+            var candidates = new[]
+            {
+                Path.Combine(TestContext.CurrentContext.TestDirectory, "cookie.json"),
+                Path.Combine(TestContext.CurrentContext.TestDirectory, "..", "..", "..", "cookie.json"),
+                Path.Combine(Directory.GetCurrentDirectory(), "cookie.json"),
+            };
+            foreach (var c in candidates)
+            {
+                var full = Path.GetFullPath(c);
+                if (File.Exists(full)) return full;
+            }
+            return null;
+        }
+
+        // Minimal DTO for cookie.json (field names match the file, not StorageQuickStatus's
+        // JsonProperty attributes, which differ slightly).
+        private class CookieRow
+        {
+            [JsonProperty("productId")] public string ProductId { get; set; }
+            [JsonProperty("buyPrice")] public double BuyPrice { get; set; }
+            [JsonProperty("buyVolume")] public long BuyVolume { get; set; }
+            [JsonProperty("buyMovingWeek")] public long BuyMovingWeek { get; set; }
+            [JsonProperty("buyOrdersCount")] public int BuyOrdersCount { get; set; }
+            [JsonProperty("sellPrice")] public double SellPrice { get; set; }
+            [JsonProperty("sellVolume")] public long SellVolume { get; set; }
+            [JsonProperty("sellMovingWeek")] public long SellMovingWeek { get; set; }
+            [JsonProperty("sellOrdersCount")] public int SellOrdersCount { get; set; }
+            [JsonProperty("timeStamp")] public DateTime TimeStamp { get; set; }
         }
 
         private static void Run(byte[] input, string name, Func<Stream, Stream> encoder, Func<Stream, Stream> decoder)
