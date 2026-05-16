@@ -41,13 +41,13 @@ public class MigrationService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var handlerLogger = serviceProvider.GetRequiredService<ILogger<MigrationHandler<AggregatedQuickStatus, SplitAggregatedQuickStatus>>>();
-        var minutehandler = new MigrationHandler<AggregatedQuickStatus, SplitAggregatedQuickStatus>(
+        var handlerLogger = serviceProvider.GetRequiredService<ILogger<MigrationHandler<AggregatedQuickStatus, FifteenDayAggregatedQuickStatus>>>();
+        var minutehandler = new MigrationHandler<AggregatedQuickStatus, FifteenDayAggregatedQuickStatus>(
                 () => BazaarService.GetMinutesTable(oldSession),
                 session, handlerLogger, redis,
                 () => BazaarService.GetSplitMinutesTable(session),
-                a => new SplitAggregatedQuickStatus(a));
-        await minutehandler.Migrate();
+            a => new FifteenDayAggregatedQuickStatus(a));
+        await minutehandler.Migrate(stoppingToken);
         logger.LogInformation("Migrated, starting to replay kafka");
         using var scope = serviceProvider.CreateScope();
         var bazaarService = scope.ServiceProvider.GetRequiredService<BazaarService>();

@@ -1,7 +1,6 @@
 extern alias CoflCore;
 
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,7 +20,7 @@ public class MigrationHandler<T, ToT>
     ISession session;
     ILogger<MigrationHandler<T, ToT>> logger;
     private readonly ConnectionMultiplexer redis;
-    Counter migrated;
+    Counter? migrated;
     private int pageSize = 4000;
     Func<T, ToT> map;
 
@@ -35,7 +34,6 @@ public class MigrationHandler<T, ToT>
         this.map = map;
     }
 
-    SemaphoreSlim queryThrottle = new SemaphoreSlim(7);
     public async Task Migrate(CancellationToken stoppingToken = default)
     {
         newTableFactory().CreateIfNotExists();
@@ -46,7 +44,7 @@ public class MigrationHandler<T, ToT>
         var pagingSateRedis = db.StringGet($"{prefix}paging_state");
         byte[]? pagingState;
         var offset = 0;
-        IPage<T> page;
+        IPage<T>? page;
         if (!pagingSateRedis.IsNullOrEmpty)
         {
             pagingState = Convert.FromBase64String(pagingSateRedis!);
@@ -59,45 +57,40 @@ public class MigrationHandler<T, ToT>
         var fromRedis = db.StringGet($"{prefix}offset");
         if (!fromRedis.IsNullOrEmpty)
         {
-            offset = int.Parse(fromRedis);
+            offset = int.Parse(fromRedis.ToString());
             logger.LogInformation("Resuming migration of {table} from {0}", tableName, offset);
         }
-        do
+        while (!stoppingToken.IsCancellationRequested)
         {
-            _ = Task.Run(async () =>
+            if (page == null)
+                break;
+
+            var batchToInsert = page!;
+            var nextPagingState = batchToInsert.PagingState;
+            var migratedBatch = false;
+
+            for (int i = 0; i < 10; i++)
             {
-                if (offset < 262440000)
+                try
                 {
-                    UpdateMigrateState(prefix, db, offset, page);
-                    Interlocked.Add(ref offset, page.Count);
-                    return; // already migrated but state lost
+                    var insertCount = await InsertBatch(prefix, db, offset, batchToInsert, i);
+                    offset += insertCount;
+                    migratedBatch = true;
+                    break;
                 }
-                for (int i = 0; i < 10; i++)
+                catch (System.Exception e)
                 {
-                    try
-                    {
-                        await queryThrottle.WaitAsync();
-                        var insertCount = await InsertBatch(prefix, db, offset, page, i);
-                        Interlocked.Add(ref offset, insertCount);
-                        return;
-                    }
-                    catch (System.Exception e)
-                    {
-                        logger.LogError(e, "Batch insert failed, {attempt}", i);
-                        await Task.Delay(2000 * i, stoppingToken);
-                    }
-                    finally
-                    {
-                        queryThrottle.Release();
-                    }
+                    logger.LogError(e, "Batch insert failed, {attempt}", i);
+                    await Task.Delay(2000 * i, stoppingToken);
                 }
-            });
-            pagingState = page.PagingState;
+            }
+
+            if (!migratedBatch)
+                throw new InvalidOperationException($"Failed to migrate batch for {tableName} after 10 attempts");
+
             logger.LogInformation("Migrated batch {0} of {table}", offset, tableName);
-            await queryThrottle.WaitAsync(stoppingToken);
-            page = await GetOldTable(pagingState);
-            queryThrottle.Release();
-        } while (page != null && !stoppingToken.IsCancellationRequested);
+            page = await GetOldTable(nextPagingState);
+        }
 
         logger.LogInformation("Migration for {tableName} done", tableName);
     }
@@ -126,7 +119,7 @@ public class MigrationHandler<T, ToT>
 
     private int UpdateMigrateState(string prefix, IDatabase db, int offset, IPage<T> batchToInsert)
     {
-        migrated.Inc(batchToInsert.Count);
+        migrated?.Inc(batchToInsert.Count);
         offset += batchToInsert.Count;
         db.StringSet($"{prefix}offset", offset);
         var queryState = batchToInsert.PagingState;
@@ -163,6 +156,7 @@ public class MigrationHandler<T, ToT>
     {
         var newTable = newTableFactory();
         var batchStatement = new BatchStatement();
+        batchStatement.SetBatchType(BatchType.Unlogged);
         foreach (var score in batchToInsert)
         {
             batchStatement.Add(newTable.Insert(map(score)));
@@ -171,7 +165,7 @@ public class MigrationHandler<T, ToT>
         await session.ExecuteAsync(batchStatement);
     }
 
-    private async Task<IPage<T>> GetOldTable(byte[]? pagingState = null)
+    private async Task<IPage<T>?> GetOldTable(byte[]? pagingState = null)
     {
         var query = oldTableFactory();
         query.SetPageSize(pageSize);
