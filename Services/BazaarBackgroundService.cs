@@ -36,7 +36,15 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             await bazaarService.Create();
-            await orderBookService.Load();
+            // Load order book in the background so Kafka consumption is not blocked
+            // by Cassandra read timeouts. BazaarPull populates the cache via GetOrAdd
+            // and LoadPersistedOrders merges into the same cache, so both are safe to
+            // run concurrently.
+            _ = orderBookService.Load().ContinueWith(t =>
+            {
+                if (t.IsFaulted)
+                    logger.LogError(t.Exception, "order book background load failed");
+            }, TaskScheduler.Default);
             while (!stoppingToken.IsCancellationRequested)
             {
                 try

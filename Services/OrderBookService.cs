@@ -613,7 +613,8 @@ public class OrderBookService
             {
 
                 await orderBookTable.CreateIfNotExistsAsync();
-                var loadedCache = new ConcurrentDictionary<string, OrderBook>();
+                // Load into a temp cache so live Kafka updates are not lost during load
+                var loadedCache = new ConcurrentDictionary<string, OrderBook>(cache);
                 var loadedOrders = await LoadPersistedOrders(loadedCache).ConfigureAwait(false);
                 cache = loadedCache;
 
@@ -625,8 +626,10 @@ public class OrderBookService
             }
             catch (System.Exception e)
             {
-                logger.LogError(e, "loading order book");
-                await Task.Delay(10_000 * (i + 1));
+                // Cap delay at 60 s to avoid blocking for hours on repeated Cassandra timeouts
+                var delayMs = Math.Min(10_000 * (i + 1), 60_000);
+                logger.LogError(e, "loading order book (attempt {Attempt}/100, retrying in {Delay}s)", i + 1, delayMs / 1000);
+                await Task.Delay(delayMs);
             }
     }
 }
