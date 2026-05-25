@@ -66,6 +66,7 @@ public class OrderBook
             outbidOrders = Sell
                 .Where(o => o.UserId != null 
                     && !o.HasBeenNotified 
+                    && o.Filled < o.Amount
                     && Math.Round(o.PricePerUnit, 1) > Math.Round(entry.PricePerUnit, 1))
                 .OrderBy(o => o.PricePerUnit) // Start with closest to new price
                 .ToList();
@@ -76,6 +77,7 @@ public class OrderBook
             outbidOrders = Buy
                 .Where(o => o.UserId != null 
                     && !o.HasBeenNotified 
+                    && o.Filled < o.Amount
                     && Math.Round(o.PricePerUnit, 1) < Math.Round(entry.PricePerUnit, 1))
                 .OrderByDescending(o => o.PricePerUnit) // Start with closest to new price
                 .ToList();

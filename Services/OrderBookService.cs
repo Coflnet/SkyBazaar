@@ -463,6 +463,27 @@ public class OrderBookService
         }
     }
 
+    public async Task MarkOrderFilled(string itemTag, string userId, double pricePerUnit, int amount)
+    {
+        if (cache.TryGetValue(itemTag, out var orderBook))
+        {
+            var allOrders = orderBook.Buy.Concat(orderBook.Sell).ToList();
+            var matching = allOrders.Where(o => o.UserId == userId
+                && Math.Round(o.PricePerUnit, 1) == Math.Round(pricePerUnit, 1)
+                && o.Amount == amount).ToList();
+            foreach (var order in matching)
+            {
+                order.Filled = order.Amount;
+                await UpdateInDb(order);
+                logger.LogInformation($"order book: Marked order as filled for {userId} {itemTag} {amount}x {pricePerUnit}");
+            }
+            if (!matching.Any())
+            {
+                logger.LogWarning($"order book: No matching order found to mark filled for {userId} {itemTag} {amount}x {pricePerUnit}");
+            }
+        }
+    }
+
     public async Task RemoveOrder(string itemTag, string userId, DateTime timestamp)
     {
         var orders = (await orderBookTable.Where(o => o.ItemId == itemTag && o.Timestamp == timestamp && o.UserId == userId).ExecuteAsync()).ToList();

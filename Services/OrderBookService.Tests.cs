@@ -541,6 +541,98 @@ public class OrderBookServiceTests
     }
 
     [Test]
+    public async Task FlipCreatedSellOrder_ShouldUndercutExistingTrackedSellOrders()
+    {
+        // Simulates the exact flip lifecycle:
+        // 1. User A ("11252") has a tracked sell order for SEEDS at 2.9
+        // 2. User B ("7" / Ekwav) has a tracked buy order for SEEDS at 1.1
+        // 3. User B's buy order flips: buy removed, sell order created at 1.2
+        // 4. User A should get an undercut notification
+        itemsApiMock.Setup(i => i.ItemNamesGetAsync(0, default)).ReturnsAsync(new List<Items.Client.Model.ItemPreview>() { new() { Tag = "SEEDS", Name = "Seeds" } });
+
+        // Step 1: User A places a tracked sell order
+        var userASellOrder = new OrderEntry()
+        {
+            Amount = 100,
+            IsSell = true,
+            ItemId = "SEEDS",
+            PlayerName = null,
+            PricePerUnit = 2.9,
+            Timestamp = DateTime.UtcNow.AddMinutes(-10),
+            UserId = "11252"
+        };
+        await orderBookService.AddOrder(userASellOrder);
+
+        // Step 2: User B places a tracked buy order
+        var userBBuyOrder = new OrderEntry()
+        {
+            Amount = 1024,
+            IsSell = false,
+            ItemId = "SEEDS",
+            PlayerName = null,
+            PricePerUnit = 1.1,
+            Timestamp = DateTime.UtcNow.AddMinutes(-5),
+            UserId = "7"
+        };
+        await orderBookService.AddOrder(userBBuyOrder);
+
+        // Step 3: Flip detected — SkyUserState removes buy and adds sell
+        // (In practice SkyUserState calls RemoveOrder then AddOrder)
+        var flipSellOrder = new OrderEntry()
+        {
+            Amount = 1024,
+            IsSell = true,
+            ItemId = "SEEDS",
+            PlayerName = null,
+            PricePerUnit = 1.2,
+            Timestamp = DateTime.UtcNow,
+            UserId = "7"
+        };
+        await orderBookService.AddOrder(flipSellOrder);
+
+        // Step 4: User A should be notified their sell order was undercut
+        messageApiMock.Verify(m => m.MessageSendUserIdPostAsync("11252", It.Is<MessageContainer>(mc =>
+            mc.Message != null && System.Text.RegularExpressions.Regex.Replace(mc.Message, "§.", "").Contains("Your sell-order for 100x Seeds has been undercut")), 0, default), Times.Once);
+    }
+
+    [Test]
+    public async Task FlipCreatedSellOrder_NoTrackedSellOrders_NoNotification()
+    {
+        // When a flip creates a sell order but only anonymous bazaar orders exist,
+        // no notification should fire because anonymous orders have no UserId to notify
+        itemsApiMock.Setup(i => i.ItemNamesGetAsync(0, default)).ReturnsAsync(new List<Items.Client.Model.ItemPreview>() { new() { Tag = "SEEDS", Name = "Seeds" } });
+
+        // Anonymous sell orders from bazaar pull
+        var anonymousSellOrder = new OrderEntry()
+        {
+            Amount = 5000,
+            IsSell = true,
+            ItemId = "SEEDS",
+            PlayerName = null,
+            PricePerUnit = 2.9,
+            Timestamp = DateTime.UtcNow.AddMinutes(-10),
+            UserId = null
+        };
+        await orderBookService.AddOrder(anonymousSellOrder);
+
+        // Flip-created sell order from user 7
+        var flipSellOrder = new OrderEntry()
+        {
+            Amount = 1024,
+            IsSell = true,
+            ItemId = "SEEDS",
+            PlayerName = null,
+            PricePerUnit = 1.2,
+            Timestamp = DateTime.UtcNow,
+            UserId = "7"
+        };
+        await orderBookService.AddOrder(flipSellOrder);
+
+        // No notifications should be sent (anonymous orders can't be notified)
+        messageApiMock.Verify(m => m.MessageSendUserIdPostAsync(It.IsAny<string>(), It.IsAny<MessageContainer>(), 0, default), Times.Never);
+    }
+
+    [Test]
     public async Task UpdateOrderBook_FutureTimestamp_ShouldIgnore()
     {
         var update = new OrderBookUpdate()

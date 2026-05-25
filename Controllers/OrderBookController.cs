@@ -61,6 +61,16 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
         }
 
         /// <summary>
+        /// Marks an order as filled so it won't trigger outbid notifications
+        /// </summary>
+        [HttpPost]
+        [Route("filled")]
+        public async Task MarkOrderFilled(string itemTag, string userId, double pricePerUnit, int amount)
+        {
+            await service.MarkOrderFilled(itemTag, userId, pricePerUnit, amount);
+        }
+
+        /// <summary>
         /// Updates the in-memory order book with external data.
         /// Ignores updates that are older than the last Kafka update or in the future.
         /// Each side (buy/sell) is ignored when empty.
