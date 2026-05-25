@@ -855,8 +855,14 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             var incomingTimestamp = pull.Max(p => p.Timestamp);
             lock (currentState)
             {
+                if (currentState.Count == 0)
+                {
+                    currentState = inserts;
+                    logger.LogDebug("Initialized currentState with {Count} entries at {Incoming}.", inserts.Count, incomingTimestamp);
+                    return;
+                }
+
                 var currentStateTimestamp = currentState.Max(c => c.TimeStamp);
-                var newTimestamp = incomingTimestamp;
                 if (incomingTimestamp > currentStateTimestamp)
                 {
                     currentState = inserts;
