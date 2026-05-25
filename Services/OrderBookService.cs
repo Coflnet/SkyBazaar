@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Cassandra;
 using Cassandra.Data.Linq;
 using Cassandra.Mapping;
 using Coflnet.Sky.Core;
@@ -16,6 +17,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services;
 
 public class OrderBookService
 {
+    private const int OrderBookLoadPageSize = 256;
     private readonly IMessageApi messageApi;
     private IItemsApi itemsApi;
     private Table<OrderEntry> orderBookTable;
@@ -552,6 +554,41 @@ public class OrderBookService
         }
     }
 
+    private static void AddLoadedOrder(ConcurrentDictionary<string, OrderBook> targetCache, OrderEntry order)
+    {
+        var orderBook = targetCache.GetOrAdd(order.ItemId, _ => new OrderBook());
+        var side = order.IsSell ? orderBook.Sell : orderBook.Buy;
+        side.Add(order);
+    }
+
+    private async Task<int> LoadPersistedOrders(ConcurrentDictionary<string, OrderBook> targetCache)
+    {
+        var loadedOrders = 0;
+        byte[] pagingState = null;
+
+        do
+        {
+            var query = orderBookTable.Select(order => order);
+            query.SetPageSize(OrderBookLoadPageSize);
+            query.SetAutoPage(false);
+            query.SetConsistencyLevel(ConsistencyLevel.LocalOne);
+            if (pagingState != null && pagingState.Length != 0)
+                query.SetPagingState(pagingState);
+
+            var page = await query.ExecutePagedAsync().ConfigureAwait(false);
+            foreach (var order in page)
+            {
+                AddLoadedOrder(targetCache, order);
+                loadedOrders++;
+            }
+
+            pagingState = page.PagingState;
+        }
+        while (pagingState != null && pagingState.Length != 0);
+
+        return loadedOrders;
+    }
+
     internal async Task Load()
     {
         var mapping = new MappingConfiguration()
@@ -576,23 +613,13 @@ public class OrderBookService
             {
 
                 await orderBookTable.CreateIfNotExistsAsync();
-                var orders = await orderBookTable.Select(o => o).ExecuteAsync();
-                foreach (var order in orders)
-                {
-                    var orderBook = cache.GetOrAdd(order.ItemId, (key) =>
-                    {
-                        var book = new OrderBook();
-                        return book;
-                    });
-                    var side = orderBook.Sell;
-                    if (!order.IsSell)
-                        side = orderBook.Buy;
-
-                    side.Add(order);
-                }
+                var loadedCache = new ConcurrentDictionary<string, OrderBook>();
+                var loadedOrders = await LoadPersistedOrders(loadedCache).ConfigureAwait(false);
+                cache = loadedCache;
 
                 // After loading all orders, mark old orders as notified except for the top order
                 MarkOldOrdersAsNotified();
+                logger.LogInformation("Loaded {OrderCount} persisted order book entries for {ItemCount} items", loadedOrders, cache.Count);
 
                 return;
             }
