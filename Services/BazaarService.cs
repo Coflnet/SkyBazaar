@@ -808,8 +808,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 };
                 return flip;
             })).ToList();
-
-            currentState = inserts;
+            UpdateCurrentStateIfNewer(pull, inserts);
             var splitTable = GetSplitSmalestTable(session);
 
             Console.WriteLine($"inserting {string.Join(',', pull.Select(p => p.Timestamp))}   at {DateTime.UtcNow}");
@@ -847,6 +846,26 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     }
             }));
             return;
+        }
+
+        private void UpdateCurrentStateIfNewer(IEnumerable<BazaarPull> pull, List<StorageQuickStatus> inserts)
+        {
+            if (inserts.Count <= 0)
+                return;
+            var incomingTimestamp = pull.Max(p => p.Timestamp);
+            lock (currentState)
+            {
+                var currentStateTimestamp = currentState.Max(c => c.TimeStamp);
+                var newTimestamp = incomingTimestamp;
+                if (incomingTimestamp > currentStateTimestamp)
+                {
+                    currentState = inserts;
+                }
+                else
+                {
+                    logger.LogDebug("Skipping currentState update: incoming {Incoming} is older than current {Current}.", incomingTimestamp, currentStateTimestamp);
+                }
+            }
         }
 
         public async Task<ISession> GetSession()
