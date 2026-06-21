@@ -157,7 +157,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 throw new ArgumentNullException(nameof(block));
 
             byte[] payload;
-            using (var raw = new MemoryStream())
+            using (var raw = new DiskBackedStream())
             {
                 using (var brotli = new BrotliStream(raw, CompressionLevel.SmallestSize, leaveOpen: true))
                 {
