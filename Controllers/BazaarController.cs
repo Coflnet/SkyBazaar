@@ -98,7 +98,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
         [HttpGet]
         public async Task<IEnumerable<GraphResult>> GetHistoryGraph(string itemId, DateTime start, DateTime end, bool smallestResolution = false)
         {
-            var points = smallestResolution ? 3 * 60 * 24 * 14 : 500;
+            var points = smallestResolution ? 3 * 60 * 24 * 14 : 2000;
             var entries = await service.GetStatus(itemId, start, end, points, smallestResolution);
             var result = entries.ToList();
 
