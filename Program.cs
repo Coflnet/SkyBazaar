@@ -1,4 +1,5 @@
-using Coflnet.Security.OpenBao;
+extern alias CoflCore;
+using CoflCore::Coflnet.Security.OpenBao;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Hosting;

@@ -8,6 +8,7 @@ using Amazon;
 using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
+using Coflnet.Sky.Core;
 using Coflnet.Sky.SkyBazaar.Models;
 using MessagePack;
 using Microsoft.Extensions.Caching.Memory;
