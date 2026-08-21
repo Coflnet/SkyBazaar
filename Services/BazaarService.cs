@@ -551,7 +551,15 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 yield return bucket;
         }
 
-        private async Task<List<AggregatedQuickStatus>> LoadMinuteHistory(ISession session, string productId, DateTime start, DateTime end, int count)
+        private static Cql CreateReadCql(string query, ConsistencyLevel? consistency, params object[] values)
+        {
+            var cql = new Cql(query, values);
+            if (consistency.HasValue)
+                cql.WithOptions(options => options.SetConsistencyLevel(consistency.Value));
+            return cql;
+        }
+
+        private async Task<List<AggregatedQuickStatus>> LoadMinuteHistory(ISession session, string productId, DateTime start, DateTime end, int count, ConsistencyLevel? consistency = null)
         {
             var mapper = new Mapper(session);
             var results = new List<AggregatedQuickStatus>();
@@ -560,9 +568,9 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 if (results.Count >= count)
                     break;
                 var remaining = count - results.Count;
-                var loaded = await mapper.FetchAsync<FifteenDayAggregatedQuickStatus>("SELECT * FROM " + TABLE_NAME_MINUTES
+                var loaded = await mapper.FetchAsync<FifteenDayAggregatedQuickStatus>(CreateReadCql("SELECT * FROM " + TABLE_NAME_MINUTES
                     + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and BucketId = ? Order by Timestamp DESC LIMIT " + remaining,
-                    productId, start, end, bucketId).ConfigureAwait(false);
+                    consistency, productId, start, end, bucketId)).ConfigureAwait(false);
                 MergeHistoryResults(results, loaded, count);
             }
 
@@ -600,9 +608,9 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 if (legacyMinuteTableDropped)
                     break; // Legacy table no longer exists; do not issue queries against it.
                 var remaining = count - results.Count;
-                var loaded = await mapper.FetchAsync<SplitAggregatedQuickStatus>("SELECT * FROM " + TABLE_NAME_MINUTES_LEGACY
+                var loaded = await mapper.FetchAsync<SplitAggregatedQuickStatus>(CreateReadCql("SELECT * FROM " + TABLE_NAME_MINUTES_LEGACY
                     + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and QuaterId = ? Order by Timestamp DESC LIMIT " + remaining,
-                    productId, start, end, quarterId).ConfigureAwait(false);
+                    consistency, productId, start, end, quarterId)).ConfigureAwait(false);
                 MergeHistoryResults(results, loaded, count);
             }
 
@@ -881,7 +889,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             throw new NotImplementedException("the session should be injected from DI");
         }
 
-        public async Task<IEnumerable<AggregatedQuickStatus>> GetStatus(string productId, DateTime start, DateTime end, int count = 1, bool smallestResolution = false, bool includeArchivedOrderbook = false)
+        public async Task<IEnumerable<AggregatedQuickStatus>> GetStatus(string productId, DateTime start, DateTime end, int count = 1, bool smallestResolution = false, bool includeArchivedOrderbook = false, ConsistencyLevel? consistency = null)
         {
             if (end == default)
                 end = DateTime.UtcNow;
@@ -903,10 +911,12 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 {
                     DateTime secondsStart = start > limitDate ? start : limitDate;
                     
-                    var secsQuery = await GetSplitSmalestTable(session)
+                    var query = GetSplitSmalestTable(session)
                         .Where(f => f.ProductId == productId && f.TimeStamp <= currentEnd && f.TimeStamp > secondsStart)
-                        .OrderByDescending(d => d.TimeStamp).Take(remainingCount)
-                        .ExecuteAsync().ConfigureAwait(false);
+                        .OrderByDescending(d => d.TimeStamp).Take(remainingCount);
+                    if (consistency.HasValue)
+                        query.SetConsistencyLevel(consistency.Value);
+                    var secsQuery = await query.ExecuteAsync().ConfigureAwait(false);
                     
                     var secs = secsQuery.ToList().Select(s => new AggregatedQuickStatus(s)).ToList();
                     result.AddRange(secs);
@@ -917,7 +927,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 
                 if (start < limitDate && remainingCount > 0)
                 {
-                    var mins = await LoadMinuteHistory(session, productId, start, currentEnd, remainingCount).ConfigureAwait(false);
+                    var mins = await LoadMinuteHistory(session, productId, start, currentEnd, remainingCount, consistency).ConfigureAwait(false);
                     result.AddRange(mins);
                     remainingCount -= mins.Count;
                 }
@@ -952,8 +962,11 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             //return await GetSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start).Take(count).ExecuteAsync();
             if (tableName == TABLE_NAME_SECONDS)
             {
-                var result = (await GetSplitSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start)
-                    .OrderByDescending(d => d.TimeStamp).Take(count).ExecuteAsync().ConfigureAwait(false))
+                var query = GetSplitSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start)
+                    .OrderByDescending(d => d.TimeStamp).Take(count);
+                if (consistency.HasValue)
+                    query.SetConsistencyLevel(consistency.Value);
+                var result = (await query.ExecuteAsync().ConfigureAwait(false))
                     .ToList().Select(s => new AggregatedQuickStatus(s));
                 if (result.Count() == 0 && start > DateTime.UtcNow - TimeSpan.FromMinutes(5))
                 {
@@ -963,13 +976,15 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 return result;
             }
             if (tableName == TABLE_NAME_DAILY_NEW)
-                return await mapper.FetchAsync<AggregatedQuickStatus>("SELECT * FROM " + tableName
-                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? Order by Timestamp DESC LIMIT " + count, productId, start, end).ConfigureAwait(false);
+                return await mapper.FetchAsync<AggregatedQuickStatus>(CreateReadCql("SELECT * FROM " + tableName
+                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? Order by Timestamp DESC LIMIT " + count,
+                    consistency, productId, start, end)).ConfigureAwait(false);
             if (tableName == TABLE_NAME_MINUTES)
-                return await LoadMinuteHistory(session, productId, start, end, count).ConfigureAwait(false);
+                return await LoadMinuteHistory(session, productId, start, end, count, consistency).ConfigureAwait(false);
             var quarterId = SplitAggregatedQuickStatus.GetQuarterId(end);
-            var loadedFlip = await mapper.FetchAsync<SplitAggregatedQuickStatus>("SELECT * FROM " + tableName
-                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and QuaterId = ? Order by Timestamp DESC LIMIT " + count, productId, start, end, quarterId).ConfigureAwait(false);
+            var loadedFlip = await mapper.FetchAsync<SplitAggregatedQuickStatus>(CreateReadCql("SELECT * FROM " + tableName
+                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and QuaterId = ? Order by Timestamp DESC LIMIT " + count,
+                    consistency, productId, start, end, quarterId)).ConfigureAwait(false);
             return loadedFlip.ToList();
         }
 

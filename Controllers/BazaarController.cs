@@ -10,6 +10,7 @@ using Coflnet.Sky.SkyAuctionTracker.Services;
 using dev;
 using Coflnet.Sky.SkyBazaar.Models;
 using Coflnet.Sky.Items.Client.Api;
+using Cassandra;
 
 namespace Coflnet.Sky.SkyAuctionTracker.Controllers
 {
@@ -62,7 +63,9 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
         public async Task<IEnumerable<SkyBazaar.Models.AggregatedQuickStatus>> GetData(string itemId, DateTime start, DateTime end, bool smallestResolution = false, bool includeArchivedOrderbook = false)
         {
             var points = smallestResolution ? 3 * 60 * 24 * 30 : 100;
-            var entries = await service.GetStatus(itemId, start, end, points, smallestResolution, includeArchivedOrderbook);
+            // The public export is the only caller of this data endpoint. Keep stronger reads
+            // here so graph, snapshot, and live status requests retain their normal consistency.
+            var entries = await service.GetStatus(itemId, start, end, points, smallestResolution, includeArchivedOrderbook, ConsistencyLevel.Quorum);
             return entries;
         }
 
