@@ -20,12 +20,20 @@ public class OrderBookServiceTests
 {
     private class NoDbOrderBookService : OrderBookService
     {
+        public bool Ready = true;
+        public override bool IsReady => Ready;
         public OrderEntry LastOrder { get; private set; }
         public OrderEntry RemovedOrder { get; private set; }
         public OrderEntry UpdatedOrder { get; private set; }
         public NoDbOrderBookService(ISessionContainer service, IMessageApi messageApi, IItemsApi itemsApi, ILogger<OrderBookService> logger) 
-            : base(service, messageApi, itemsApi, logger)
+            : base(service, messageApi, itemsApi, logger, null)
         {
+        }
+        public List<(string UserId, int Filled, bool Created)> Published = new();
+        protected override Task PublishOrders(OrderEntry order, bool created = false)
+        {
+            Published.Add((order.UserId, order.Filled, created));
+            return Task.CompletedTask;
         }
         protected override Task InsertToDb(OrderEntry order)
         {
@@ -80,7 +88,7 @@ public class OrderBookServiceTests
             ItemId = "test",
             PlayerName = "test",
             PricePerUnit = 9,
-            Timestamp = DateTime.UtcNow,
+            Timestamp = order.Timestamp.AddMilliseconds(1),
             UserId = "1"
         };
         await orderBookService.AddOrder(undercutOrder);
@@ -174,6 +182,7 @@ public class OrderBookServiceTests
             }
         });
         // orders should be removed - new ones present
+        orderbook = await orderBookService.GetOrderBook(buyOrder.ItemId);
         Assert.That(orderbook.Buy.Count, Is.EqualTo(1));
         Assert.That(orderbook.Buy.First().PricePerUnit, Is.EqualTo(1));
         Assert.That(orderbook.Sell.Count, Is.EqualTo(1));
@@ -242,7 +251,7 @@ public class OrderBookServiceTests
         
         // All orders should be marked as notified
         var orderbook = await orderBookService.GetOrderBook("test");
-        Assert.That(orderbook.Sell.Where(o => o.UserId != null && o != newOrder).All(o => o.HasBeenNotified), Is.True);
+        Assert.That(orderbook.Sell.Where(o => o.UserId != null && o.UserId != newOrder.UserId).All(o => o.HasBeenNotified), Is.True);
     }
 
     [Test]
@@ -655,13 +664,13 @@ public class OrderBookServiceTests
     }
 
     [Test]
-    public async Task UpdateOrderBook_NoKafkaTimeYet_AcceptsAnyValidTimestamp()
+    public async Task UpdateOrderBook_NoKafkaTimeYet_AcceptsFreshTimestamp()
     {
-        // When no Kafka update time has been established yet, any valid timestamp should be accepted
+        // A fresh observation can seed an empty market book.
         var update = new OrderBookUpdate()
         {
             ItemTag = "FRESH",
-            Timestamp = DateTime.UtcNow.AddSeconds(-10), // Even older timestamp should work
+            Timestamp = DateTime.UtcNow.AddSeconds(-2),
             BuyOrders = new List<OrderEntry>
             {
                 new() { Amount = 5, PricePerUnit = 10, IsSell = false }
@@ -794,8 +803,8 @@ public class OrderBookServiceTests
         Assert.That(result, Is.True, "Update should be accepted");
         
         orderBook = await orderBookService.GetOrderBook("COAL");
-        Assert.That(orderBook.Buy.Count, Is.EqualTo(1), "No new order should be added");
-        Assert.That(orderBook.Buy[0].Amount, Is.EqualTo(15), "Amount should be updated to 15");
+        Assert.That(orderBook.Buy.Sum(o => o.Amount - o.Filled), Is.EqualTo(15));
+        Assert.That(orderBook.Buy[0].Amount, Is.EqualTo(10), "Older liquidity keeps its FIFO position");
     }
 
     [Test]
@@ -827,8 +836,7 @@ public class OrderBookServiceTests
         orderBook = await orderBookService.GetOrderBook("OAK");
         Assert.That(orderBook.Buy.Count, Is.GreaterThanOrEqualTo(3), "Non-top orders should be preserved");
         
-        var topOrder = orderBook.Buy.OrderByDescending(o => o.PricePerUnit).First();
-        Assert.That(topOrder.Amount, Is.EqualTo(10), "Top order amount should be updated");
+        Assert.That(orderBook.Buy.Where(o => o.PricePerUnit == 100).Sum(o => o.Amount - o.Filled), Is.EqualTo(10));
     }
 
     [Test]
@@ -1059,25 +1067,207 @@ public class OrderBookServiceTests
 
         orderBook = await orderBookService.GetOrderBook("DUSTGRAIN");
         
-        // The update should remove only orders that:
-        // 1. Fall within the min/max price range of the incoming update [134281.8, 134282.9]
-        // 2. Are NOT in the incoming update
-        // This handles filled orders while preserving orders outside the range
-        //
-        // Initial 11 orders:
-        // - 134199.9 (below range) → kept
-        // - 134200.0 (below range) → kept  
-        // - 134281.8, 134281.9, 134282.0*, 134282.1, 134282.2, 134282.3, 134282.8, 134282.9 (8 in range, 7 in update)
-        // - 134283.0 (above range) → kept
-        // Result: 11 - 1 (134282.0) = 10 orders
-        Assert.That(orderBook.Sell.Count, Is.EqualTo(10), "Should have 10 sell orders (1 removed within range, others preserved)");
+        // Lower sell prices have been passed by the market; a missing level inside the
+        // displayed range also vanishes. The worse price outside the visible range remains.
+        Assert.That(orderBook.Sell.Count, Is.EqualTo(8), "Price moved past two lower levels, and one level vanished within the visible range");
         
         // Verify the correct order was removed
         var pricesAfterUpdate = orderBook.Sell.OrderBy(o => o.PricePerUnit).Select(o => o.PricePerUnit).ToList();
-        Assert.That(pricesAfterUpdate, Contains.Item(134199.9), "Orders below update range should be preserved");
-        Assert.That(pricesAfterUpdate, Contains.Item(134200.0), "Orders below update range should be preserved");
+        Assert.That(pricesAfterUpdate, Does.Not.Contain(134199.9), "The market moved past this sell price");
+        Assert.That(pricesAfterUpdate, Does.Not.Contain(134200.0), "The market moved past this sell price");
         Assert.That(pricesAfterUpdate, Does.Not.Contain(134282.0), "134282.0 should be removed (not in update, within range)");
         Assert.That(pricesAfterUpdate, Contains.Item(134283.0), "Orders above update range should be preserved");
     }
+    [Test]
+    public async Task PartialFillsFollowFifoAndPublishOnlyAffectedUsers()
+    {
+        var start = DateTime.UtcNow.AddSeconds(-15);
+        await orderBookService.AddOrder(new() { ItemId = "WHEAT", Amount = 10, PricePerUnit = 5, Timestamp = start });
+        var first = new OrderEntry { UserId = "1", PlayerName = "one", ItemId = "WHEAT", Amount = 20,
+            PricePerUnit = 5, Timestamp = start.AddSeconds(1) };
+        var second = new OrderEntry { UserId = "2", PlayerName = "two", ItemId = "WHEAT", Amount = 30,
+            PricePerUnit = 5, Timestamp = start.AddSeconds(2) };
+        await orderBookService.AddOrder(first);
+        await orderBookService.AddOrder(second);
+        orderBookService.Published.Clear();
+        await orderBookService.UpdateOrderBook(new() { ItemTag = "WHEAT", Timestamp = start.AddSeconds(10),
+            BuyOrders = new() { new() { PricePerUnit = 5, Amount = 35 } } });
+        Assert.That(first.Amount, Is.EqualTo(20));
+        Assert.That(first.Filled, Is.EqualTo(15));
+        Assert.That(second.Filled, Is.Zero);
+        Assert.That(orderBookService.Published, Is.EqualTo(new[] { ("1", 15, false) }));
+        await orderBookService.UpdateOrderBook(new() { ItemTag = "WHEAT", Timestamp = start.AddSeconds(11),
+            BuyOrders = new() { new() { PricePerUnit = 5, Amount = 25 } } });
+        Assert.That(first.Filled, Is.EqualTo(20));
+        Assert.That(second.Filled, Is.EqualTo(5));
+        Assert.That(orderBookService.GetUserOrders("1").Single().Filled, Is.EqualTo(20), "Keep filled orders until claimed");
+        await orderBookService.RemoveOrder("WHEAT", "1", first.Timestamp);
+        Assert.That(orderBookService.GetUserOrders("1"), Is.Empty);
+        Assert.That(orderBookService.GetUserOrders("2"), Has.Count.EqualTo(1));
+    }
+
+    [Test]
+    public async Task KafkaShrinkingLevelAdvancesTrackedFillWithoutOrderMenu()
+    {
+        var order = new OrderEntry { UserId = "1", ItemId = "WHEAT", Amount = 64,
+            IsSell = true, PricePerUnit = 10, Timestamp = DateTime.UtcNow.AddSeconds(-10) };
+        await orderBookService.AddOrder(order);
+        await orderBookService.BazaarPull(new dev.BazaarPull { Timestamp = DateTime.UtcNow,
+            Products = new() { new() { ProductId = "WHEAT", BuySummery = new() {
+                new() { PricePerUnit = 10, Amount = 48 } }, SellSummary = new() } } });
+        Assert.That(order.Filled, Is.EqualTo(16));
+        Assert.That(orderBookService.Published.Last(), Is.EqualTo(("1", 16, false)));
+    }
+
+    [Test]
+    public async Task LateRegistrationDoesNotDoubleCountAndReplayDoesNotUndoFills()
+    {
+        var time = DateTime.UtcNow.AddSeconds(-10);
+        await orderBookService.AddOrder(new() { ItemId = "WHEAT", Amount = 64, PricePerUnit = 10, Timestamp = time });
+        await orderBookService.AddOrder(new() { UserId = "1", ItemId = "WHEAT", Amount = 32,
+            PricePerUnit = 10, Timestamp = time.AddSeconds(-1) });
+        var book = await orderBookService.GetOrderBook("WHEAT");
+        Assert.That(book.Buy.Sum(o => o.Amount - o.Filled), Is.EqualTo(64));
+        await orderBookService.UpdateOrderBook(new() { ItemTag = "WHEAT", Timestamp = time.AddSeconds(1),
+            BuyOrders = new() { new() { Amount = 48, PricePerUnit = 10 } } });
+        await orderBookService.AddOrder(new() { UserId = "1", ItemId = "WHEAT", Amount = 32,
+            PricePerUnit = 10, Timestamp = time.AddSeconds(-1) });
+        Assert.That(orderBookService.GetUserOrders("1").Single().Filled, Is.EqualTo(16));
+        Assert.That((await orderBookService.GetOrderBook("WHEAT")).Buy.Sum(o => o.Amount - o.Filled), Is.EqualTo(48));
+    }
+
+    [Test]
+    public async Task ObservationsCorrectFillsAndRemoveOnlyTheObservedPlayersOrders()
+    {
+        var time = DateTime.UtcNow.AddMinutes(-1);
+        await orderBookService.AddOrder(new() { UserId = "1", PlayerName = "one", ItemId = "WHEAT", Amount = 64,
+            Filled = 30, PricePerUnit = 10, Timestamp = time });
+        await orderBookService.AddOrder(new() { UserId = "1", PlayerName = "alt", ItemId = "WHEAT", Amount = 64,
+            PricePerUnit = 10, Timestamp = time.AddSeconds(1) });
+        var observation = new PlayerOrderObservation { UserId = "1", PlayerName = "one", Timestamp = time.AddSeconds(5),
+            Orders = new() { new() { ItemId = "WHEAT", Amount = 64, Filled = 12, PricePerUnit = 10, Timestamp = time } } };
+        await orderBookService.ObservePlayerOrders(observation);
+        Assert.That(orderBookService.GetUserOrders("1").Single(o => o.PlayerName == "one").Filled, Is.EqualTo(12));
+        await orderBookService.ObservePlayerOrders(new() { UserId = "1", PlayerName = "one", Timestamp = time.AddSeconds(6) });
+        await orderBookService.ObservePlayerOrders(observation);
+        Assert.That(orderBookService.GetUserOrders("1").Single().PlayerName, Is.EqualTo("alt"));
+    }
+    [Test]
+    public async Task StartupLoadIdentifiesExistingLiquidityAndCannotReviveCancelledOrders()
+    {
+        var time = DateTime.UtcNow.AddMinutes(-1);
+        await orderBookService.AddOrder(new() { ItemId = "WHEAT", Amount = 100, PricePerUnit = 10, Timestamp = time.AddSeconds(5) });
+        var saved = new OrderEntry { UserId = "1", ItemId = "WHEAT", Amount = 40, Filled = 10,
+            PricePerUnit = 10, Timestamp = time };
+        await orderBookService.AddLoadedOrder(saved);
+        Assert.That((await orderBookService.GetOrderBook("WHEAT")).Buy.Sum(o => o.Amount - o.Filled), Is.EqualTo(100));
+        await orderBookService.RemoveOrder("WHEAT", "1", saved.Timestamp);
+        await orderBookService.AddLoadedOrder(saved);
+        Assert.That(orderBookService.GetUserOrders("1"), Is.Empty);
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task CompletionStaysEstimatedUntilMarketMovesPastItsPrice(bool sell)
+    {
+        var time = DateTime.UtcNow.AddSeconds(-5);
+        await orderBookService.AddOrder(new() { UserId = "1", PlayerName = "Ekwav", ItemId = "WHEAT",
+            Amount = 64, PricePerUnit = 10, IsSell = sell, Timestamp = time });
+        async Task Update(int seconds, double price, int amount)
+        {
+            var levels = new List<OrderEntry> { new() { PricePerUnit = price, Amount = amount } };
+            await orderBookService.UpdateOrderBook(new() { ItemTag = "WHEAT", Timestamp = time.AddSeconds(seconds),
+                BuyOrders = sell ? null : levels, SellOrders = sell ? levels : null });
+        }
+        await Update(1, 10, 32);
+        Assert.That(orderBookService.GetUserOrders("1").Single().IsEstimate, Is.True);
+        await Update(2, 10, 0);
+        Assert.That(orderBookService.GetUserOrders("1").Single().Filled, Is.EqualTo(64));
+        Assert.That(orderBookService.GetUserOrders("1").Single().IsEstimate, Is.True);
+        await Update(3, sell ? 9 : 11, 10); // Being undercut/outbid is not confirmation.
+        Assert.That(orderBookService.GetUserOrders("1").Single().IsEstimate, Is.True);
+        await Update(4, sell ? 11 : 9, 10);
+        Assert.That(orderBookService.GetUserOrders("1").Single().IsEstimate, Is.False);
+        Assert.That(orderBookService.GetUserOrders("1").Single().Filled, Is.EqualTo(64));
+    }
+
+    [Test]
+    public async Task DelayedPlayerStateViewCannotUndoNewerDirectPriceEstimate()
+    {
+        var time = DateTime.UtcNow.AddSeconds(-15);
+        var order = new OrderEntry { UserId = "1", PlayerName = "Ekwav", ItemId = "WHEAT", Amount = 64,
+            PricePerUnit = 10, Timestamp = time };
+        await orderBookService.AddOrder(order);
+        await orderBookService.UpdateOrderBook(new() { ItemTag = "WHEAT", Timestamp = time.AddSeconds(10),
+            BuyOrders = new() { new() { PricePerUnit = 10, Amount = 32 } } });
+        var oldView = new PlayerOrderObservation { UserId = "1", PlayerName = "Ekwav", Timestamp = time.AddSeconds(5),
+            Orders = new() { new() { ItemId = "WHEAT", Amount = 64, Filled = 16, PricePerUnit = 10, Timestamp = time } } };
+        await orderBookService.ObservePlayerOrders(oldView);
+        Assert.That(orderBookService.GetUserOrders("1").Single().Filled, Is.EqualTo(32));
+        Assert.That(orderBookService.GetUserOrders("1").Single().IsEstimate, Is.True);
+        oldView.Timestamp = time.AddSeconds(11);
+        oldView.Orders[0].Filled = 40;
+        await orderBookService.ObservePlayerOrders(oldView);
+        Assert.That(orderBookService.GetUserOrders("1").Single().Filled, Is.EqualTo(40));
+        Assert.That(orderBookService.GetUserOrders("1").Single().IsEstimate, Is.False);
+    }
+
+    [Test]
+    public async Task ExpiredFastObservationsAreDroppedEvenForAnEmptyBook()
+    {
+        var accepted = await orderBookService.UpdateOrderBook(new() { ItemTag = "WHEAT",
+            Timestamp = DateTime.UtcNow.AddSeconds(-11), BuyOrders = new() { new() { Amount = 64, PricePerUnit = 10 } } });
+        Assert.That(accepted, Is.False);
+        Assert.That((await orderBookService.GetOrderBook("WHEAT")).Buy, Is.Empty);
+    }
+
+    [Test]
+    public async Task LoadingRejectsPersonalUpdatesWithRetryHintAndDropsFastPrices()
+    {
+        orderBookService.Ready = false;
+        var controller = new Coflnet.Sky.SkyAuctionTracker.Controllers.OrderBookController(orderBookService) {
+            ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext {
+                HttpContext = new Microsoft.AspNetCore.Http.DefaultHttpContext()
+            }
+        };
+        var result = await controller.AddOrder(new() { ItemId = "WHEAT", UserId = "1", Amount = 64 });
+        Assert.That(((Microsoft.AspNetCore.Mvc.ObjectResult)result).StatusCode, Is.EqualTo(503));
+        Assert.That(controller.Response.Headers.RetryAfter.ToString(), Is.EqualTo("10"));
+        Assert.That(orderBookService.LastOrder, Is.Null);
+        Assert.That(await controller.UpdateOrderBook(new() { ItemTag = "WHEAT", Timestamp = DateTime.UtcNow }), Is.False);
+    }
+
+    private class CapturedLogs : ILogger<OrderBookService>
+    {
+        public readonly List<Dictionary<string, object>> Entries = new();
+        public bool IsEnabled(LogLevel level) => true;
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => null;
+        public void Log<TState>(LogLevel level, EventId id, TState state, Exception exception, Func<TState, Exception, string> formatter) =>
+            Entries.Add(((IEnumerable<KeyValuePair<string, object>>)state).ToDictionary(p => p.Key, p => p.Value));
+    }
+
+    [Test]
+    public async Task DiagnosticsExplainEstimatedCompletionAndItsConfirmationWithoutChangingMatching()
+    {
+        var logs = new CapturedLogs();
+        var service = new NoDbOrderBookService(null, messageApiMock.Object, itemsApiMock.Object, logs);
+        var time = DateTime.UtcNow.AddSeconds(-8);
+        var order = new OrderEntry { UserId = "diagnostic-user", ItemId = "WHEAT", Amount = 64, PricePerUnit = 10, Timestamp = time };
+        await service.AddOrder(order);
+        await service.UpdateOrderBook(new() { ItemTag = "WHEAT", Timestamp = time.AddSeconds(1), BuyOrders = new() { new() { PricePerUnit = 10, Amount = 32 } } });
+        await service.UpdateOrderBook(new() { ItemTag = "WHEAT", Timestamp = time.AddSeconds(2), BuyOrders = new() { new() { PricePerUnit = 9, Amount = 64 } } });
+        var confirmation = logs.Entries.Single(e => e.GetValueOrDefault("Reason") as string == "price_passed");
+        Assert.That(confirmation["OrderId"], Is.EqualTo(OrderBookService.OrderId(order)));
+        Assert.That(confirmation["PreviousEstimate"], Is.True);
+        Assert.That(confirmation["IsEstimate"], Is.False);
+        Assert.That(confirmation["Filled"], Is.EqualTo(64));
+        Assert.That(confirmation["ObservedAt"], Is.EqualTo(time.AddSeconds(2)));
+        var dropped = BazaarTelemetry.Observations.WithLabels("direct", "expired").Value;
+        Assert.That(await service.UpdateOrderBook(new() { ItemTag = "WHEAT", Timestamp = DateTime.UtcNow.AddSeconds(-11) }), Is.False);
+        Assert.That(BazaarTelemetry.Observations.WithLabels("direct", "expired").Value, Is.EqualTo(dropped + 1));
+        Assert.That(logs.Entries.Any(e => e.GetValueOrDefault("Result") as string == "expired"), Is.True);
+        Assert.That(service.GetUserOrders("diagnostic-user").Single().Filled, Is.EqualTo(64));
+    }
+
 }
 

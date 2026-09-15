@@ -28,6 +28,20 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
             this.service = service;
         }
 
+        private ObjectResult Loading()
+        {
+            Response.Headers.RetryAfter = "10";
+            return StatusCode(503, new { code = "bazaar_loading", message = "Order matching is loading; retry in 10 seconds" });
+        }
+
+        /// <summary>Gets an authoritative user snapshot and rebuilds its Redis cache.</summary>
+        [HttpGet("user/{userId}")]
+        public async Task<IActionResult> GetUserOrders(string userId)
+        {
+            if (!service.IsReady) return Loading();
+            return Content(await service.GetSnapshot(userId), "application/json");
+        }
+
         /// <summary>
         /// Gets the order book for a specific item
         /// </summary>
@@ -45,19 +59,23 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
         /// </summary>
         /// <param name="order"></param>
         [HttpPost]
-        public async Task AddOrder(OrderEntry order)
+        public async Task<IActionResult> AddOrder(OrderEntry order)
         {
+            if (!service.IsReady) return Loading();
             order.IsVerfified = false;
             await service.AddOrder(order);
+            return Ok();
         }
 
         /// <summary>
         /// Removes and order from the order book
         /// </summary>
         [HttpDelete]
-        public async Task RemoveOrder(string itemTag, string userId, DateTime timestamp)
+        public async Task<IActionResult> RemoveOrder(string itemTag, string userId, DateTime timestamp)
         {
+            if (!service.IsReady) return Loading();
             await service.RemoveOrder(itemTag, userId, timestamp);
+            return Ok();
         }
 
         /// <summary>
@@ -65,9 +83,11 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
         /// </summary>
         [HttpPost]
         [Route("filled")]
-        public async Task MarkOrderFilled(string itemTag, string userId, double pricePerUnit, int amount)
+        public async Task<IActionResult> MarkOrderFilled(string itemTag, string userId, double pricePerUnit, int amount)
         {
+            if (!service.IsReady) return Loading();
             await service.MarkOrderFilled(itemTag, userId, pricePerUnit, amount);
+            return Ok();
         }
 
         /// <summary>
@@ -82,6 +102,19 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
         public async Task<bool> UpdateOrderBook([FromBody] OrderBookUpdate update)
         {
             return await service.UpdateOrderBook(update);
+        }
+
+        /// <summary>Reconciles a player's orders observed through a description upload.</summary>
+        [HttpPost("player")]
+        public async Task<IActionResult> ObservePlayerOrders(PlayerOrderObservation observation)
+        {
+            if (!service.IsReady) return Loading();
+            if (string.IsNullOrWhiteSpace(observation.UserId) || string.IsNullOrWhiteSpace(observation.PlayerName)
+                || observation.Timestamp > DateTime.UtcNow || observation.Orders == null
+                || observation.Orders.Exists(o => o == null || string.IsNullOrWhiteSpace(o.ItemId) || o.Amount <= 0))
+                throw new ArgumentException("Invalid player order observation");
+            await service.ObservePlayerOrders(observation);
+            return Ok();
         }
 
         /// <summary>

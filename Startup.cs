@@ -11,6 +11,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Prometheus;
 using Coflnet.Sky.Items.Client.Api;
 using Coflnet.Sky.EventBroker.Client.Api;
@@ -58,18 +59,32 @@ namespace Coflnet.Sky.SkyAuctionTracker
             else
                 services.AddHostedService<BazaarBackgroundService>();
             services.AddCoflnetCore();
-            // services.AddJaeger(Configuration);
+            // Export asynchronously when configured; tracing must not add a startup dependency.
+            if (!string.IsNullOrWhiteSpace(Configuration["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]))
+            {
+                services.AddJaeger(Configuration, Configuration.GetValue("BAZAAR_TRACE_SAMPLE_RATE", 0.01));
+                services.AddOpenTelemetry().WithTracing(b => b.AddSource(BazaarTelemetry.SourceName));
+            }
             services.AddSingleton<BazaarService>();
             services.AddResponseCaching();
             services.AddResponseCompression();
             services.AddMemoryCache();
             services.AddSingleton(d => ConnectionMultiplexer.Connect(Configuration["SETTINGS_REDIS_HOST"]));
+            services.AddSingleton<IConnectionMultiplexer>(sp => sp.GetRequiredService<ConnectionMultiplexer>());
+            services.AddKeyedSingleton<IConnectionMultiplexer>("bazaar", (sp, key) => {
+                var options = ConfigurationOptions.Parse(Configuration["EVENTS_REDIS_HOST"] ?? "sky-event-broker-redis");
+                options.AbortOnConnectFail = false;
+                options.ConnectTimeout = 1000;
+                options.AsyncTimeout = 1000;
+                options.ConnectRetry = 0;
+                return ConnectionMultiplexer.Connect(options);
+            });
+            services.AddSingleton<BazaarOrderPublisher>();
+            services.AddHostedService(sp => sp.GetRequiredService<BazaarOrderPublisher>());
             services.AddSingleton<OrderBookService>();
             services.AddSingleton<IBlobHistoryStore, S3BlobHistoryStore>();
             if (bool.TryParse(Configuration["HISTORY_ARCHIVE:ENABLED"], out var archiveEnabled) && archiveEnabled)
                 services.AddHostedService<HistoryArchiveService>();
-            // Run a small migration on startup to ensure the new column exists
-            services.AddHostedService<Services.Migrations.AddHasBeenNotifiedMigration>();
             services.AddSingleton<ISessionContainer>(d => d.GetRequiredService<BazaarService>());
             services.AddSingleton<IItemsApi, ItemsApi>(d =>
             {
@@ -88,6 +103,12 @@ namespace Coflnet.Sky.SkyAuctionTracker
         /// <param name="env"></param>
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
         {
+            var logger = app.ApplicationServices.GetRequiredService<ILogger<Startup>>();
+            if (string.IsNullOrWhiteSpace(Configuration["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]))
+                logger.LogWarning("Bazaar trace export disabled: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not configured; logs and metrics remain active");
+            else
+                logger.LogInformation("Bazaar tracing enabled for {SourceName}, root sample rate {SampleRate}",
+                    BazaarTelemetry.SourceName, Configuration.GetValue("BAZAAR_TRACE_SAMPLE_RATE", 0.01));
             if (env.IsDevelopment())
             {
                 app.UseDeveloperExceptionPage();

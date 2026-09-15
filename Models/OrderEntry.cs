@@ -15,10 +15,14 @@ public class OrderEntry
     /// </summary>
     public bool IsVerfified { get; set; }
     public int Filled { get; set; }
+    /// <summary>True (or unknown for legacy rows) until an observation confirms the fill.</summary>
+    public bool? IsEstimate { get; set; }
     /// <summary>
     /// Has the user been notified about being outbid/undercut for this order?
     /// </summary>
     public bool HasBeenNotified { get; set; }
+
+    internal OrderEntry Copy() => (OrderEntry)MemberwiseClone();
 
     public override bool Equals(object obj)
     {
