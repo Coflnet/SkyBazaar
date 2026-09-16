@@ -151,7 +151,7 @@ public class BazaarOrderPublisher([FromKeyedServices("bazaar")] IConnectionMulti
                     .ToDictionary(tag => tag, tag => names.GetValueOrDefault(tag, tag))
             });
             update.Payload = payload;
-            foreach (var order in orders.Where(o => notify && o.Amount > 0 && o.Filled == o.Amount && o.IsEstimate == false))
+            foreach (var order in orders.Where(o => notify && !o.IsExpired && o.Timestamp > DateTime.UtcNow.AddDays(-7) && o.Amount > 0 && o.Filled == o.Amount && o.IsEstimate == false))
             {
                 var reference = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
                     $"bazaar-filled:{userId}:{order.ItemId}:{order.IsSell}:{order.Timestamp.Ticks}")))[..32];

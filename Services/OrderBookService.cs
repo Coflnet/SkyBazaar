@@ -29,7 +29,10 @@ public class OrderBookService
     private ConcurrentDictionary<string, DateTime> lastKafkaUpdateTime = new ConcurrentDictionary<string, DateTime>();
     private HashSet<string> lastBazaarItems = new();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> itemLocks = new();
-    private readonly ConcurrentDictionary<string, OrderEntry> userOrders = new();
+    // Both indexes reference the same entries. Membership changes hold the item's lock.
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, OrderEntry>> ordersByItem = new();
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, OrderEntry>> ordersByUser = new();
+    private readonly ConcurrentDictionary<string, DateTime> marketFillTimes = new();
     private readonly BazaarOrderPublisher publisher;
     private volatile bool ordersLoaded;
     public virtual bool IsReady => ordersLoaded;
@@ -38,7 +41,19 @@ public class OrderBookService
     private readonly ConcurrentDictionary<string, DateTime> playerObservationTimes = new();
     private static DateTime DatabaseTime(DateTime time) =>
         new(time.ToUniversalTime().Ticks / TimeSpan.TicksPerMillisecond * TimeSpan.TicksPerMillisecond, DateTimeKind.Utc);
-    internal List<OrderEntry> GetUserOrders(string userId) => userOrders.Values.Where(o => o.UserId == userId).Select(o => o.Copy()).ToList();
+    private static IEnumerable<OrderEntry> IndexedOrders(ConcurrentDictionary<string, ConcurrentDictionary<string, OrderEntry>> index, string key) =>
+        index.TryGetValue(key, out var orders) ? orders.Select(pair => pair.Value) : Enumerable.Empty<OrderEntry>();
+
+    private IEnumerable<OrderEntry> AllUserOrders => ordersByItem.SelectMany(item => item.Value.Select(pair => pair.Value));
+
+    private void IndexOrder(OrderEntry order)
+    {
+        var id = OrderId(order);
+        ordersByItem.GetOrAdd(order.ItemId, _ => new())[id] = order;
+        ordersByUser.GetOrAdd(order.UserId, _ => new())[id] = order;
+    }
+
+    internal List<OrderEntry> GetUserOrders(string userId) => IndexedOrders(ordersByUser, userId).Select(o => o.Copy()).ToList();
 
     internal Task<string> GetSnapshot(string userId) =>
         publisher.Publish(userId, null, false, () => GetUserOrders(userId), notify: false);
@@ -137,16 +152,17 @@ public class OrderBookService
             .ToDictionary(g => g.Key, g => Math.Max(0, g.Sum(o => o.Amount)));
         var min = levels.Keys.DefaultIfEmpty(double.MaxValue).Min();
         var max = levels.Keys.DefaultIfEmpty(double.MinValue).Max();
-        var positivePrices = levels.Where(p => p.Value > 0).Select(p => p.Key).ToList();
-        bool PricePassed(double price) => positivePrices.Count > 0
-            && (isSell ? price < positivePrices.Min() : price > positivePrices.Max());
-        var covered = side.Where(o => o.Timestamp <= timestamp).Select(o => Math.Round(o.PricePerUnit, 1))
+        var positivePrices = levels.Where(p => p.Value > 0).Select(p => p.Key);
+        var bestPrice = isSell ? positivePrices.DefaultIfEmpty(double.MinValue).Min()
+            : positivePrices.DefaultIfEmpty(double.MaxValue).Max();
+        bool PricePassed(double price) => isSell ? price < bestPrice : price > bestPrice;
+        var queues = side.Where(o => o.Timestamp <= timestamp && (o.UserId == null || o.Timestamp > timestamp.AddDays(-7))).ToLookup(o => Math.Round(o.PricePerUnit, 1));
+        var covered = queues.Select(group => group.Key)
             .Where(price => fullSummary ? (isSell ? price <= max : price >= min) || levels.Count == 0
                 : price >= min && price <= max || PricePassed(price));
         foreach (var price in levels.Keys.Union(covered).ToList())
         {
-            var queue = side.Where(o => Math.Round(o.PricePerUnit, 1) == price && o.Timestamp <= timestamp)
-                .OrderBy(o => o.Timestamp).ToList();
+            var queue = queues[price].OrderBy(o => o.Timestamp).ToList();
             var delta = levels.GetValueOrDefault(price) - queue.Sum(o => o.Amount - o.Filled);
             if (delta != 0 && logger.IsEnabled(LogLevel.Trace))
                 logger.LogTrace("Bazaar level {ItemTag} sell {IsSell}, price {Price}: observed {Quantity}, remaining change {Delta}, queue entries {QueueCount}, at {ObservedAt:o}; TraceId {TraceId}",
@@ -180,6 +196,7 @@ public class OrderBookService
                         var previousEstimate = order.IsEstimate;
                         order.Filled += filled;
                         order.IsEstimate = true;
+                        marketFillTimes[OrderId(order)] = timestamp;
                         if (order.Filled == order.Amount)
                             side.Remove(order);
                         await UpdateInDb(order);
@@ -191,14 +208,15 @@ public class OrderBookService
                 }
             }
         }
-        foreach (var order in userOrders.Values.Where(o => o.ItemId == tag && o.IsSell == isSell
-            && o.Timestamp <= timestamp && (o.Filled < o.Amount || o.IsEstimate != false)
+        foreach (var order in IndexedOrders(ordersByItem, tag).Where(o => o.IsSell == isSell
+            && !o.IsExpired && o.Timestamp > timestamp.AddDays(-7) && o.Timestamp <= timestamp && (o.Filled < o.Amount || o.IsEstimate != false)
             && PricePassed(Math.Round(o.PricePerUnit, 1))).ToList())
         {
             var before = order.Filled;
             var previousEstimate = order.IsEstimate;
             order.Filled = order.Amount;
             order.IsEstimate = false;
+            marketFillTimes[OrderId(order)] = timestamp;
             side.Remove(order);
             await UpdateInDb(order);
             BazaarTelemetry.Transition(logger, order, before, previousEstimate, "price_passed", timestamp);
@@ -221,45 +239,57 @@ public class OrderBookService
         order.Timestamp = DatabaseTime(order.Timestamp);
         order.Filled = Math.Clamp(order.Filled, 0, order.Amount);
         order.IsEstimate = false; // Chat and personal order views are direct observations.
+        order.IsExpired |= order.UserId != null && order.Timestamp <= DateTime.UtcNow.AddDays(-7);
         var book = cache.GetOrAdd(order.ItemId, _ => new());
         var side = order.IsSell ? book.Sell : book.Buy;
         var created = false;
         var before = 0;
         bool? previousEstimate = null;
+        var previousExpired = false;
         if (order.UserId != null)
         {
-            created = !userOrders.TryGetValue(OrderId(order), out var existing);
+            var owned = ordersByItem.GetOrAdd(order.ItemId, _ => new());
+            created = !owned.TryGetValue(OrderId(order), out var existing);
             if (existing != null)
             {
                 before = existing.Filled;
                 previousEstimate = existing.IsEstimate;
+                previousExpired = existing.IsExpired;
                 side.Remove(existing);
-                if ((!observed && order.Filled < existing.Filled)
-                    || (observedAt.HasValue && lastKafkaUpdateTime.TryGetValue(order.ItemId, out var marketTime)
-                        && observedAt.Value < marketTime))
+                order.IsExpired |= existing.IsExpired;
+                if (!observed && existing.Claimed.HasValue)
+                    order.Claimed = Math.Max(order.Claimed ?? 0, existing.Claimed.Value);
+                else
+                    order.Claimed ??= existing.Claimed;
+                var newerMarketFill = observedAt.HasValue && marketFillTimes.TryGetValue(OrderId(order), out var marketTime)
+                    && observedAt.Value < marketTime;
+                if ((!observed && order.Filled < existing.Filled) || !order.IsExpired && newerMarketFill)
                 {
                     logger.LogDebug("Preserving newer fill for order {OrderId}; incoming {IncomingFilled}, current {Filled}, observation {ObservedAt}; TraceId {TraceId}",
                         OrderId(order), order.Filled, existing.Filled, observedAt, Activity.Current?.TraceId.ToString());
                     order.Filled = existing.Filled;
                     order.IsEstimate = existing.IsEstimate;
                 }
+                if (order.IsExpired || observedAt.HasValue && !newerMarketFill)
+                    marketFillTimes.TryRemove(OrderId(order), out _);
                 order.HasBeenNotified = existing.HasBeenNotified;
             }
-            else
+            else if (!order.IsExpired)
             {
                 ReplaceAnonymous(side, order);
             }
-            userOrders[OrderId(order)] = order;
+            IndexOrder(order);
         }
-        var outbidOrders = order.Filled < order.Amount ? book.GetAllOutbidOrders(order) : new List<OrderEntry>();
-        if (order.Filled < order.Amount)
+        var outbidOrders = !observed && (created || order.UserId == null) && !order.IsExpired && order.Filled < order.Amount ? book.GetAllOutbidOrders(order) : new List<OrderEntry>();
+        if (!order.IsExpired && order.Filled < order.Amount)
             side.Add(order);
         if (order.UserId != null)
         {
             await InsertToDb(order);
-            if (created || before != order.Filled || previousEstimate != order.IsEstimate)
+            if (created || before != order.Filled || previousEstimate != order.IsEstimate || previousExpired != order.IsExpired)
                 BazaarTelemetry.Transition(logger, order, before, previousEstimate, created ? "registered" : observed ? "personal_view" : "chat", observedAt ?? DateTime.UtcNow);
-            await PublishOrders(order, created && !observed && order.Filled == 0);
+            if (!observed)
+                await PublishOrders(order, created && order.Filled == 0);
         }
         foreach (var outbid in outbidOrders)
         {
@@ -369,7 +399,7 @@ public class OrderBookService
         });
 
         var itemsToRemove = lastBazaarItems.Except(currentBazaarItems).ToHashSet();
-        foreach (var order in userOrders.Values.Where(o => itemsToRemove.Contains(o.ItemId)
+        foreach (var order in AllUserOrders.Where(o => itemsToRemove.Contains(o.ItemId)
             || o.Timestamp < DateTime.UtcNow.AddDays(-7)).ToList())
             await RemoveOrder(order.ItemId, order.UserId, order.Timestamp);
         foreach (var itemTag in itemsToRemove)
@@ -385,7 +415,7 @@ public class OrderBookService
         await gate.WaitAsync();
         try
         {
-            foreach (var order in userOrders.Values.Where(o => o.ItemId == itemTag && o.UserId == userId
+            foreach (var order in IndexedOrders(ordersByItem, itemTag).Where(o => o.UserId == userId && !o.IsExpired
                 && Math.Round(o.PricePerUnit, 1) == Math.Round(pricePerUnit, 1) && o.Amount == amount).ToList())
             {
                 var before = order.Filled;
@@ -402,7 +432,7 @@ public class OrderBookService
         finally { gate.Release(); }
     }
 
-    public async Task RemoveOrder(string itemTag, string userId, DateTime timestamp)
+    public async Task RemoveOrder(string itemTag, string userId, DateTime timestamp, bool publish = true)
     {
         timestamp = DatabaseTime(timestamp);
         var gate = itemLocks.GetOrAdd(itemTag, _ => new(1));
@@ -413,14 +443,17 @@ public class OrderBookService
                 removedDuringLoad[(itemTag, userId, timestamp)] = 0;
             // Also delete orders not loaded into memory yet.
             await RemoveFromDb(new OrderEntry { ItemId = itemTag, UserId = userId, Timestamp = timestamp });
-            foreach (var order in userOrders.Values.Where(o => o.ItemId == itemTag
-                && o.UserId == userId && o.Timestamp == timestamp).ToList())
+            foreach (var order in IndexedOrders(ordersByItem, itemTag).Where(o => o.UserId == userId && o.Timestamp == timestamp).ToList())
             {
-                userOrders.TryRemove(OrderId(order), out _);
+                var id = OrderId(order);
+                marketFillTimes.TryRemove(id, out _);
+                ordersByItem[itemTag].TryRemove(id, out _);
+                ordersByUser[userId].TryRemove(id, out _);
                 BazaarTelemetry.Transition(logger, order, order.Filled, order.IsEstimate, "removed", DateTime.UtcNow);
                 if (cache.TryGetValue(itemTag, out var book))
                     book.Remove(order);
-                await PublishOrders(order);
+                if (publish)
+                    await PublishOrders(order);
             }
         }
         finally { gate.Release(); }
@@ -431,6 +464,7 @@ public class OrderBookService
         using var span = BazaarTelemetry.Source.StartActivity("bazaar.observe.player");
         span?.SetTag("bazaar.user_id", observation.UserId);
         span?.SetTag("bazaar.observed_at", observation.Timestamp.ToString("O"));
+        var started = Stopwatch.GetTimestamp();
         var player = $"{observation.UserId}:{observation.PlayerName}";
         var gate = playerLocks.GetOrAdd(player, _ => new(1));
         await gate.WaitAsync();
@@ -450,13 +484,16 @@ public class OrderBookService
                 await AddOrder(order, observed: true, observedAt: observation.Timestamp);
             }
             var observed = observation.Orders.Select(OrderId).ToHashSet();
-            foreach (var order in userOrders.Values.Where(o => o.UserId == observation.UserId
-                && o.PlayerName == observation.PlayerName && o.Timestamp <= observation.Timestamp
+            foreach (var order in IndexedOrders(ordersByUser, observation.UserId).Where(o => o.PlayerName == observation.PlayerName && o.Timestamp <= observation.Timestamp
                 && !observed.Contains(OrderId(o))).ToList())
-                await RemoveOrder(order.ItemId, order.UserId, order.Timestamp);
+                await RemoveOrder(order.ItemId, order.UserId, order.Timestamp, publish: false);
+            await PublishOrders(new() { UserId = observation.UserId, PlayerName = observation.PlayerName });
             playerObservationTimes[player] = observation.Timestamp;
-            logger.LogDebug("Reconciled {OrderCount} orders for {UserId}/{PlayerName} at {ObservedAt:o}; TraceId {TraceId}",
-                observation.Orders.Count, observation.UserId, observation.PlayerName, observation.Timestamp, Activity.Current?.TraceId.ToString());
+            var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            logger.Log(elapsed > 1000 ? LogLevel.Information : LogLevel.Debug,
+                "Reconciled {OrderCount} orders for {UserId}/{PlayerName} at {ObservedAt:o} in {ElapsedMs} ms, observation age {AgeMs} ms; TraceId {TraceId}",
+                observation.Orders.Count, observation.UserId, observation.PlayerName, observation.Timestamp, elapsed,
+                (DateTime.UtcNow - observation.Timestamp).TotalMilliseconds, Activity.Current?.TraceId.ToString());
         }
         finally { gate.Release(); }
     }
@@ -511,17 +548,20 @@ public class OrderBookService
     internal async Task AddLoadedOrder(OrderEntry order)
     {
         order.Timestamp = DatabaseTime(order.Timestamp);
+        order.IsExpired |= order.Timestamp <= DateTime.UtcNow.AddDays(-7);
         var gate = itemLocks.GetOrAdd(order.ItemId, _ => new(1));
         await gate.WaitAsync();
         try
         {
             if (removedDuringLoad.ContainsKey((order.ItemId, order.UserId, order.Timestamp))
-                || !userOrders.TryAdd(OrderId(order), order))
+                || ordersByItem.TryGetValue(order.ItemId, out var owned) && owned.ContainsKey(OrderId(order)))
                 return; // A live observation/removal takes precedence over a startup database read.
+            IndexOrder(order);
             var book = cache.GetOrAdd(order.ItemId, _ => new());
             var side = order.IsSell ? book.Sell : book.Buy;
-            ReplaceAnonymous(side, order);
-            if (order.Filled < order.Amount)
+            if (!order.IsExpired)
+                ReplaceAnonymous(side, order);
+            if (!order.IsExpired && order.Filled < order.Amount)
                 side.Add(order);
         }
         finally { gate.Release(); }
@@ -576,6 +616,8 @@ public class OrderBookService
                 .Column(o => o.HasBeenNotified, cm => cm.WithName("has_been_notified"))
                 .Column(o => o.Filled, cm => cm.WithName("filled"))
                 .Column(o => o.IsEstimate, cm => cm.WithName("is_estimate"))
+                .Column(o => o.IsExpired, cm => cm.WithName("is_expired"))
+                .Column(o => o.Claimed, cm => cm.WithName("claimed"))
             );
         ArgumentNullException.ThrowIfNull(sessionContainer.Session);
         orderBookTable = new Table<OrderEntry>(sessionContainer.Session, mapping);
@@ -593,7 +635,7 @@ public class OrderBookService
 
                 // After loading all orders, mark old orders as notified except for the top order
                 await MarkOldOrdersAsNotified();
-                foreach (var order in userOrders.Values.DistinctBy(o => o.UserId))
+                foreach (var order in AllUserOrders.DistinctBy(o => o.UserId))
                     await PublishOrders(order);
 
                 return;

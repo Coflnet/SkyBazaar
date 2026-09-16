@@ -29,7 +29,8 @@ continued matching. The Fabric client needs no separate order-menu uploader.
 - `POST /OrderBook` registers/upserts an owned order. Full-fill chat confirms `Filled = Amount`.
 - `DELETE /OrderBook` removes claimed/cancelled orders by item, user and creation timestamp.
 - `POST /OrderBook/player` reconciles a complete personal observation with `UserId`, `PlayerName`,
-  `Timestamp`, and `Orders`. Delayed views cannot undo newer market fill estimates.
+  `Timestamp`, and `Orders`. Delayed views cannot undo newer market fill changes; unchanged
+  market ticks do not block corrections. The final reconciled state is published once per view.
 - `POST /OrderBook/update` accepts parsed price levels directly from SkyApi. The public Kafka
   market feed uses the same matcher. These mutation endpoints are internal service APIs.
 - `GET /OrderBook/user/{userId}` returns an authoritative snapshot and rebuilds its Redis cache.
@@ -45,12 +46,19 @@ orders remain in this ledger until claimed, cancelled, reconciled away, or expir
 the active matching queue. **Bazaar orders expire after seven days. The seven-day tracking lifetime
 is intentional and matches the game; it is not an arbitrary retention limit or an offline defect.**
 The snapshot TTL is refreshed on publication; order expiry follows the order timestamp.
+An explicit `Expired!` personal observation also sets `IsExpired`, keeping its observed fill
+count out of further matching. Expired entries may still have items awaiting collection.
+`Filled` counts all fills; nullable `Claimed` counts withdrawals separately. For example,
+Gill Membrane can be 1,024/1,024 filled, expired, with 512 claimed and 512 left to collect.
+Partial claim chat updates only its order, preserving newer fills and the other orders.
+It preserves the order until all items are withdrawn; claims do not emit
+new completion alerts. UserState keeps observation timestamps so delayed menus cannot undo claims.
 
 ## Startup and temporary outages
 
 Order restoration starts in the background independently of historical-table setup. The schema
 check uses the existing order-book session/keyspace and adds missing nullable `has_been_notified`
-and `is_estimate` columns before reading orders. It does not backfill existing rows or open an extra
+and `is_estimate`, plus `is_expired`/`claimed` columns before reading orders. It does not backfill existing rows or open an extra
 Cassandra session. Matching becomes ready immediately after restoring the ledger, before initial
 snapshot broadcasts. Item-name lookups also do not delay publication.
 
@@ -87,18 +95,18 @@ existing duties; changing generic Redis variables is unnecessary. The broker reu
 
 Redis key `bazaar:orders:v1:{userId}` holds a rebuildable snapshot for ten minutes; updates publish on
 `bazaar:orders:v1`. Payloads contain `UserId`, `PlayerName`, `Created`, `Revision`, `Orders`
-(including `Filled` and nullable `IsEstimate`), and `ItemNames`. Revisions use a process counter
+(including `Filled`, nullable `IsEstimate`, `IsExpired` and nullable `Claimed`), and `ItemNames`. Revisions use a process counter
 seeded from UTC ticks rather than a disposable Redis counter, so ordinary restarts/cache loss do
 not make readers reject new state. SkyBazaar remains a single authoritative matcher instance.
 
 SkyApi's authenticated `GET /api/player/bazaar/orders` filters state by the API-key user and
-Minecraft player, preserves customer history, and adds `filledAmount`/`isEstimate`. It is not
+Minecraft player, preserves customer history, and adds `filledAmount`/`isEstimate` plus `isExpired`/`claimedAmount`. It is not
 publicly cached. Both this reader and HUD restoration request the authoritative snapshot when
 Redis is missing/unavailable. The API falls back to observed player history with `isEstimate: true`
 when an older or loading SkyBazaar cannot provide it.
 
-Info display 2 remains gated to the exact test client version **`2.0.0-pre1`**, with estimate labels,
-hover text, reconnect restoration, the tutorial and the saved disable preference. Other mod
+Info display 2 remains gated to the exact test client version **`2.0.0-pre1`**, with expiry/claim counts,
+confidence in hover text, reconnect restoration, the tutorial and the saved disable preference. Other mod
 versions receive neither the order display nor its tutorial.
 
 ## Persistence and offline alerts
@@ -117,7 +125,7 @@ keys and consumer-group pending state. Writes since the last completed save can 
 not synchronous durability. See [Redis persistence](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/).
 
 A Lua script saves/publishes the snapshot and appends confirmed completions to `bazaar:fills:v1`.
-Stable order references and eight-day dedup keys suppress repeat enqueueing. Estimated completions
+Stable order references and eight-day dedup keys suppress repeat enqueueing. Estimated completions and expired orders
 do not alert. SkyEventBroker consumes the stream with group `sky-eventbroker-bazaar`, reclaims
 abandoned pending entries after a minute, and atomically acknowledges/deletes them after successful processing.
 Delivery is at least once; a crash after sending but before acknowledgement can repeat a delivery.

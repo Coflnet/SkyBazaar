@@ -31,13 +31,14 @@ internal static class BazaarTelemetry
         Transitions.WithLabels(reason).Inc();
         var level = reason == "market_decrease" ? LogLevel.Debug : LogLevel.Information;
         if (logger.IsEnabled(level))
-            logger.Log(level, "Bazaar order {OrderId} {Reason}: filled {PreviousFilled}->{Filled}/{Amount}, estimate {PreviousEstimate}->{IsEstimate}, price {Price}, observation {ObservedAt:o}; TraceId {TraceId}",
+            logger.Log(level, "Bazaar order {OrderId} {Reason}: filled {PreviousFilled}->{Filled}/{Amount}, estimate {PreviousEstimate}->{IsEstimate}, expired {IsExpired}, claimed {Claimed}, price {Price}, observation {ObservedAt:o}; TraceId {TraceId}",
             OrderBookService.OrderId(order), reason, before, order.Filled, order.Amount, previousEstimate, order.IsEstimate,
-            order.PricePerUnit, observedAt, Activity.Current?.TraceId.ToString());
+            order.IsExpired, order.Claimed, order.PricePerUnit, observedAt, Activity.Current?.TraceId.ToString());
         if (Activity.Current?.IsAllDataRequested == true)
             Activity.Current.AddEvent(new ActivityEvent("bazaar.order.changed", tags: new ActivityTagsCollection {
                 { "bazaar.order_id", OrderBookService.OrderId(order) }, { "bazaar.reason", reason },
                 { "bazaar.previous_filled", before }, { "bazaar.filled", order.Filled },
+                { "bazaar.is_expired", order.IsExpired }, { "bazaar.claimed", order.Claimed },
                 { "bazaar.is_estimate", order.IsEstimate }, { "bazaar.observed_at", observedAt.ToString("O") }
             }));
     }

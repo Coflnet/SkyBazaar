@@ -163,3 +163,39 @@ every three seconds, retaining its fifteen-minute failure budget (300 attempts).
 continues to use `/ready`, which requires successful database activity within five minutes;
 this change removes probe waiting time, not actual initialization or database recovery time.
 The existing Longhorn storage class supports expansion from 90 MiB to the requested 200 MB.
+
+## Ekwav menu/claim investigation on 2026-09-16
+
+Loki confirmed menu uploads at 20:32:48, 20:33:55 and 20:35:00–44 UTC. UserState received
+those views after roughly 0.1–2.8 seconds. The 20:35:10.876 claim chat reached the UserState update entry
+at 20:35:17.485 (6.61 seconds). At 20:35:45, claim chat was processed before an older menu
+upload: applying that menu afterwards could restore a just-claimed order. These timings
+measure ingestion/handler arrival, not the full client-to-display latency.
+
+The uploaded lore explicitly contained expired Agatha orders at 91/160 and 0/160, a fully
+filled 2,000 order with 1,616 claimable, and Gill Membrane at 1,024 filled with 512 claimable.
+The parser previously lost expiry when restoring the order timestamp, ignored claimable
+amounts, and fell back to truncated vendor lists for abbreviated `1k`/`2k` fill text.
+
+- Preserve `IsExpired` and nullable `Claimed` through UserState, the ledger, Redis and readers.
+  Expired orders never rejoin matching or generate new fill/outbid alerts. Seven-day expiry
+  also stops matching without another upload. Claiming does not announce a new completion.
+- Personal reconciliation publishes once after applying the view and removals, and does not
+  generate historical outbid alerts while registering already existing orders.
+- Only a newer **fill change**, rather than any newer market tick, blocks a personal fill
+  correction. Explicit expiry overrides the former matching estimate.
+- A stored UserState observation timestamp prevents older menus from reversing claims and
+  prevents older claim chat from subtracting quantities already reflected by a newer menu.
+- Slow reconciliation (over one second) logs duration and observation age at Information;
+  transitions include expiry and claimed count, also attached to trace events.
+
+Deploy SkyBazaar first to enable the additive `is_expired`/`claimed` column migration, then
+UserState for parsing and claim handling; API and ModCommands consume the optional metadata.
+Mixed versions remain wire compatible, but expiry/claim accuracy requires both producer and
+matcher updates. One fresh order-menu upload corrects already misclassified historical orders.
+Existing delivered/queued notifications are not retrospectively withdrawn. Public SkyApi price
+parsing still pushes directly to SkyBazaar, and the client version gate stays `2.0.0-pre1`.
+
+Validation: 51 Bazaar matching/publisher tests (including isolated Redis), 73 UserState
+Bazaar/persistence tests, 20 ModCommands display tests and 7 API reader tests passed. Local
+validation used the existing temporary MSBuild package overrides described in ORDER_UPDATES.md.

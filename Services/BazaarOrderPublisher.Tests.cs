@@ -71,6 +71,11 @@ public class BazaarOrderPublisherTests
         Assert.That(await db.KeyTimeToLiveAsync($"{BazaarOrderPublisher.Channel}:{userId}"),
             Is.InRange(TimeSpan.FromMinutes(9), TimeSpan.FromMinutes(10)), "Snapshots can be rebuilt from the authoritative ledger");
         order.IsEstimate = false;
+        order.IsExpired = true;
+        order.Claimed = 32;
+        await publisher.Publish(userId, order.PlayerName, false, () => new() { order });
+        Assert.That(await db.StreamLengthAsync(BazaarOrderPublisher.FillStream), Is.EqualTo(before), "Expired orders must not create fill alerts");
+        order.IsExpired = false;
         await publisher.Publish(userId, order.PlayerName, false, () => new() { order });
         await new BazaarOrderPublisher(redis, items.Object, NullLogger<BazaarOrderPublisher>.Instance)
             .Publish(userId, order.PlayerName, false, () => new() { order });
