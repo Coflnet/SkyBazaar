@@ -54,6 +54,11 @@ and `is_estimate` columns before reading orders. It does not backfill existing r
 Cassandra session. Matching becomes ready immediately after restoring the ledger, before initial
 snapshot broadcasts. Item-name lookups also do not delay publication.
 
+Startup and readiness probes check `/ready` immediately, every three seconds, with no
+fixed readiness delay. The startup probe retains a fifteen-minute failure budget. `/ready`
+still requires recent successful database activity; matching endpoints additionally check
+whether the order ledger has loaded.
+
 While loading, owned-order mutations and authoritative snapshot reads return `503` with
 `Retry-After: 10`. SkyUserState retains the captured observation and retries transient failures
 after ten seconds without replaying transaction parsing. Direct SkyApi price uploads have only
@@ -80,7 +85,7 @@ The Talos chart already supplies the shared EventBroker address. Other clusters 
 `EVENTS_REDIS_HOST` at that service or its mirror. Settings/API/mod Redis connections retain their
 existing duties; changing generic Redis variables is unnecessary. The broker reuses its connection.
 
-Redis key `bazaar:orders:v1:{userId}` holds a full snapshot for seven days; updates publish on
+Redis key `bazaar:orders:v1:{userId}` holds a rebuildable snapshot for ten minutes; updates publish on
 `bazaar:orders:v1`. Payloads contain `UserId`, `PlayerName`, `Created`, `Revision`, `Orders`
 (including `Filled` and nullable `IsEstimate`), and `ItemNames`. Revisions use a process counter
 seeded from UTC ticks rather than a disposable Redis counter, so ordinary restarts/cache loss do
@@ -98,9 +103,9 @@ versions receive neither the order display nor its tutorial.
 
 ## Persistence and offline alerts
 
-The Talos EventBroker Redis deployment now has an opt-in **90 MiB (94,371,840 bytes)** Longhorn
-volume, below 100 MB of provisioned logical capacity. Other Redis deployments remain unchanged.
-The inspected broker instance used about 1.8 MB before this change. Its data limit is now 32 MB
+The Talos EventBroker Redis deployment now has an opt-in **200 MB (200,000,000 bytes)** Longhorn
+volume. Other Redis deployments remain unchanged.
+The rollout exhausted the original 32 MiB cap. Its data limit is now 50 MiB
 with `noeviction`, leaving disk room for the previous and replacement RDB snapshots. This is a
 capacity bound, not a prediction of future order/alert volume; write failures remain visible and
 retry instead of evicting pending notifications. Longhorn replication adds physical storage cost.

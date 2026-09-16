@@ -112,7 +112,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
             if (string.IsNullOrWhiteSpace(observation.UserId) || string.IsNullOrWhiteSpace(observation.PlayerName)
                 || observation.Timestamp > DateTime.UtcNow || observation.Orders == null
                 || observation.Orders.Exists(o => o == null || string.IsNullOrWhiteSpace(o.ItemId) || o.Amount <= 0))
-                throw new ArgumentException("Invalid player order observation");
+                return BadRequest(new { code = "invalid_player_orders", message = "Player orders require a user, player name, non-future observation timestamp, item IDs and positive amounts" });
             await service.ObservePlayerOrders(observation);
             return Ok();
         }

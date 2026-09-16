@@ -68,6 +68,8 @@ public class BazaarOrderPublisherTests
         Assert.That(await pushed.Task.WaitAsync(TimeSpan.FromSeconds(5)),
             Is.EqualTo((string)await db.StringGetAsync($"{BazaarOrderPublisher.Channel}:{userId}")));
         Assert.That(await db.StreamLengthAsync(BazaarOrderPublisher.FillStream), Is.EqualTo(before), "An estimated 100% fill must not alert");
+        Assert.That(await db.KeyTimeToLiveAsync($"{BazaarOrderPublisher.Channel}:{userId}"),
+            Is.InRange(TimeSpan.FromMinutes(9), TimeSpan.FromMinutes(10)), "Snapshots can be rebuilt from the authoritative ledger");
         order.IsEstimate = false;
         await publisher.Publish(userId, order.PlayerName, false, () => new() { order });
         await new BazaarOrderPublisher(redis, items.Object, NullLogger<BazaarOrderPublisher>.Instance)

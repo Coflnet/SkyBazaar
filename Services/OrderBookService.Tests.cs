@@ -1222,6 +1222,19 @@ public class OrderBookServiceTests
     }
 
     [Test]
+    public async Task InvalidPersonalViewReturnsBadRequestWithoutReplacingTrackedOrders()
+    {
+        var controller = new Coflnet.Sky.SkyAuctionTracker.Controllers.OrderBookController(orderBookService);
+        var result = await controller.ObservePlayerOrders(new() {
+            UserId = "1", PlayerName = "Ekwav", Timestamp = DateTime.UtcNow.AddSeconds(-1),
+            Orders = new() { new() { Amount = 64, ItemId = null } }
+        });
+        Assert.That(result, Is.TypeOf<Microsoft.AspNetCore.Mvc.BadRequestObjectResult>());
+        Assert.That(orderBookService.LastOrder, Is.Null);
+        Assert.That(orderBookService.RemovedOrder, Is.Null);
+    }
+
+    [Test]
     public async Task LoadingRejectsPersonalUpdatesWithRetryHintAndDropsFastPrices()
     {
         orderBookService.Ready = false;

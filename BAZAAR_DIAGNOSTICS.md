@@ -136,3 +136,30 @@ are reachable in production.
 
 These additions do not remove the previously documented RDB save window or the in-memory pending
 publication crash window. See [order update architecture](ORDER_UPDATES.md).
+
+## Orders-menu refresh failure found on 2026-09-16
+
+The client reported a ten-second description HTTP timeout followed by a null-array error.
+SkyApi nevertheless logged an uploaded `Ekwav Co-op Bazaar Orders` view. UserState repeatedly
+received HTTP 500 from `/OrderBook/player`: menu items without an item tag made the entire
+observation invalid. Resolve missing tags using the existing item-name lookup before sending;
+malformed observations return HTTP 400 so they do not block a player in an endless retry loop.
+The BUY-name parser must strip formatting before removing the side prefix.
+
+Independently, Redis reached its 32 MiB cap. The sampled dataset held roughly 17,400 keys,
+17.9 MB of string payloads and 12,790 queued fill events; a single user snapshot was 1.3 MB.
+Publisher logs contained `OOM command not allowed` and retained pending updates. Rebuildable
+snapshots now expire after ten minutes instead of seven days, with the authoritative order
+ledger unchanged. The chart raises the cap to 50 MiB and the volume to 200 MB, preserving space
+for both RDB files. Deploy both changes; existing cache keys acquire the shorter TTL
+when republished. Watch pending publications and stream lag drain after rollout.
+
+## Slow rollout readiness found on 2026-09-16
+
+The Talos overlay forced `readinessProbe.initialDelaySeconds: 90`, overriding the chart default.
+The observed container started at 19:03:38 UTC and became Ready at 19:05:09 UTC (91 seconds).
+Remove that override and set both startup/readiness initial delays to zero. Startup now checks
+every three seconds, retaining its fifteen-minute failure budget (300 attempts). Readiness
+continues to use `/ready`, which requires successful database activity within five minutes;
+this change removes probe waiting time, not actual initialization or database recovery time.
+The existing Longhorn storage class supports expansion from 90 MiB to the requested 200 MB.

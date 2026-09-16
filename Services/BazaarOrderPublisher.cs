@@ -23,9 +23,11 @@ public class BazaarOrderPublisher([FromKeyedServices("bazaar")] IConnectionMulti
     public const string FillStream = "bazaar:fills:v1";
     // Save the HUD/API state and enqueue each confirmed completion with deduplication. Delivery to
     // external notification targets happens in EventBroker, outside the price update request.
+    // This is a rebuildable cache; the seven-day authoritative ledger lives in Scylla.
+    // Retaining every inactive user's snapshot for seven days exhausted the shared Redis.
     internal const string PublishScript = """
         local enqueued = 0
-        redis.call('SET', KEYS[1], ARGV[1], 'EX', 604800)
+        redis.call('SET', KEYS[1], ARGV[1], 'EX', 600)
         redis.call('PUBLISH', KEYS[2], ARGV[1])
         for i = 4, #KEYS do
             if redis.call('EXISTS', KEYS[i]) == 0 then
