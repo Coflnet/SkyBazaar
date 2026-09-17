@@ -106,6 +106,8 @@ references are deliberately not metric labels. Counters/gauges are per process a
 | --- | --- |
 | `sky_bazaar_matching_ready` | 0 while restoring the ledger, 1 when matching is available |
 | `sky_bazaar_observations_total{source,result}` | Direct/Kafka observations accepted or dropped (`applied`, `loading`, `expired`, `future`, `out_of_order`); Kafka outcomes normally count product observations, with one outcome for an entire skipped loading/expired pull |
+| `sky_bazaar_match_duration_seconds{source}` | Successful processing including lock waits, ledger writes and publication attempts; `direct` is one price upload, `kafka` is a full market pull, `personal` is a complete personal view |
+| `sky_bazaar_matched_observation_age_seconds{source}` | Age of the source observation at processing completion, including upstream transport delay |
 | `sky_bazaar_order_transitions_total{reason}` | `registered`, `personal_view`, `chat`, `market_decrease`, `price_passed`, `legacy_confirmed`, `removed` |
 | `sky_bazaar_order_persistence_failures_total{operation}` | Failed ledger insert/update/delete |
 | `sky_bazaar_publications_total{result}` | Successful/failed Redis publication attempts |
@@ -199,3 +201,43 @@ parsing still pushes directly to SkyBazaar, and the client version gate stays `2
 Validation: 51 Bazaar matching/publisher tests (including isolated Redis), 73 UserState
 Bazaar/persistence tests, 20 ModCommands display tests and 7 API reader tests passed. Local
 validation used the existing temporary MSBuild package overrides described in ORDER_UPDATES.md.
+
+## Matching latency and partial claims (2026-09-17)
+
+The sampled deployment logged 113 price-passed transitions: median source age 6.03s,
+p95 11.03s. This is observation age, not isolated matching CPU time. For example, the
+22:42:41.052Z pull began history insertion at 22:42:42.064Z and confirmed orders at
+22:42:49.864Z. Matching now runs before that batch's historical inserts. History still
+shares the Kafka consumer: a slow previous batch can delay the next one. Direct SkyApi
+uploads remain independent and retain their ten-second expiry.
+
+Market matching persists final changes with at most eight concurrent writes per side,
+then publishes once per affected user. Personal refreshes process independent item groups
+concurrently (eight maximum), preserving per-item locks and publishing after reconciliation.
+The matching tests cover both sources and sides, all 50 affected users with two orders each,
+and an unaffected user. Session delivery tests cover a slow tutorial and a disconnected socket.
+Matching covers registered users regardless of connection status; the HUD retains its existing
+2.0.0-pre1 version gate and player filter.
+
+Use a one-second processing target separately from source-to-publication age:
+
+```promql
+histogram_quantile(0.95, sum by (source, le) (rate(sky_bazaar_match_duration_seconds_bucket[5m])))
+sum by (source) (rate(sky_bazaar_match_duration_seconds_bucket{le="1"}[5m]))
+  / sum by (source) (rate(sky_bazaar_match_duration_seconds_count[5m]))
+histogram_quantile(0.95, sum by (source, le) (rate(sky_bazaar_matched_observation_age_seconds_bucket[5m])))
+```
+
+Also check publication failures/pending users: a failed Redis attempt can return quickly
+while delivery remains pending. These metrics do not measure client rendering or acknowledge
+receipt by Minecraft. The Kafka market poll cadence also limits how quickly an otherwise
+unobserved in-game event can be detected. Confirm live percentiles after deployment; local
+I/O simulations do not establish a production latency guarantee.
+
+Ekwav's Gill Membrane menu at 22:35:25.2460183Z reported 256 claimable items, followed
+5.354ms later by the chat for that same 256-item withdrawal. UserState added it twice and
+removed the order. UserState now carries newly observed withdrawal amounts forward until
+matching claim chat consumes them, instead of relying on upload timestamp ordering alone.
+That credit survives persistence, repeated menus do not increase it, and subsequent genuine
+claims still reduce the remainder. Reopening the orders view restores an already removed
+order from its current lore; no ledger migration or mod update is needed for this fix.

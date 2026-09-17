@@ -30,15 +30,17 @@ public class OrderBookServiceTests
         {
         }
         public List<(string UserId, int Filled, bool Created)> Published = new();
+        public Func<OrderEntry, Task> OnWrite = _ => Task.CompletedTask;
         protected override Task PublishOrders(OrderEntry order, bool created = false)
         {
-            Published.Add((order.UserId, order.Filled, created));
+            lock (Published)
+                Published.Add((order.UserId, order.Filled, created));
             return Task.CompletedTask;
         }
         protected override Task InsertToDb(OrderEntry order)
         {
             LastOrder = order;
-            return Task.CompletedTask;
+            return OnWrite(order);
         }
         protected override Task RemoveFromDb(OrderEntry order)
         {
@@ -48,7 +50,7 @@ public class OrderBookServiceTests
         protected override Task UpdateInDb(OrderEntry order)
         {
             UpdatedOrder = order;
-            return Task.CompletedTask;
+            return OnWrite(order);
         }
     }
     private NoDbOrderBookService orderBookService;
@@ -1371,6 +1373,67 @@ public class OrderBookServiceTests
         await orderBookService.MarkOrderFilled(saved.ItemId, saved.UserId, 10, 64);
         Assert.That(orderBookService.Published, Has.Count.EqualTo(publications), "Removed orders cannot be found by the item index");
         Assert.That(orderBookService.GetUserOrders(saved.UserId).Single().ItemId, Is.EqualTo("DIAMOND"));
+    }
+
+    [TestCase(false, false)]
+    [TestCase(false, true)]
+    [TestCase(true, false)]
+    [TestCase(true, true)]
+    public async Task MarketChangePersistsFinalStateAndPublishesEveryAffectedUserOnce(bool kafka, bool sell)
+    {
+        var time = DateTime.UtcNow.AddSeconds(-5);
+        for (var user = 0; user < 50; user++)
+            for (var order = 0; order < 2; order++)
+                await orderBookService.AddLoadedOrder(new() { UserId = "user-" + user, ItemId = "WHEAT",
+                    Amount = 10, PricePerUnit = 10, IsSell = sell, Timestamp = time.AddMilliseconds(order) });
+        await orderBookService.AddLoadedOrder(new() { UserId = "unaffected", ItemId = "OTHER",
+            Amount = 10, PricePerUnit = 10, Timestamp = time });
+        orderBookService.Published.Clear();
+        var writes = new ConcurrentBag<OrderEntry>();
+        orderBookService.OnWrite = async order => { await Task.Delay(30); writes.Add(order.Copy()); };
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var price = sell ? 11 : 9; // Price has passed every tracked order.
+        if (kafka)
+            await orderBookService.BazaarPull(new() { Timestamp = DateTime.UtcNow, Products = new() {
+                new() { ProductId = "WHEAT",
+                    BuySummery = sell ? new() { new() { PricePerUnit = price, Amount = 100 } } : new(),
+                    SellSummary = sell ? new() : new() { new() { PricePerUnit = price, Amount = 100 } } },
+                new() { ProductId = "OTHER", BuySummery = new(), SellSummary = new() { new() { PricePerUnit = 10, Amount = 10 } } }
+            } });
+        else
+            await orderBookService.UpdateOrderBook(new() { ItemTag = "WHEAT", Timestamp = DateTime.UtcNow,
+                BuyOrders = sell ? null : new() { new() { PricePerUnit = price, Amount = 100 } },
+                SellOrders = sell ? new() { new() { PricePerUnit = price, Amount = 100 } } : null });
+        TestContext.Progress.WriteLine($"100 fills / 50 users with 30ms ledger I/O: {clock.Elapsed.TotalMilliseconds:F0}ms (kafka={kafka}, sell={sell})");
+        Assert.That(writes, Has.Count.EqualTo(100), "Each final state is persisted once, including estimate-to-confirmed changes");
+        Assert.That(writes.All(o => o.Filled == 10 && o.IsEstimate == false), Is.True);
+        Assert.That(orderBookService.Published, Has.Count.EqualTo(50));
+        for (var user = 0; user < 50; user++)
+        {
+            Assert.That(orderBookService.Published.Count(p => p.UserId == "user-" + user), Is.EqualTo(1));
+            Assert.That(orderBookService.GetUserOrders("user-" + user).All(o => o.Filled == 10 && o.IsEstimate == false), Is.True);
+        }
+        Assert.That(orderBookService.GetUserOrders("unaffected").Single().Filled, Is.Zero);
+    }
+
+    [Test]
+    public async Task SlowLedgerWriteDoesNotBlockOtherItemsDuringPersonalRefresh()
+    {
+        var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var progressed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        orderBookService.OnWrite = order => order.ItemId == "SLOW" ? blocked.Task : CompleteOtherItem();
+        Task CompleteOtherItem() { progressed.TrySetResult(); return Task.CompletedTask; }
+        var refresh = orderBookService.ObservePlayerOrders(new() { UserId = "1", PlayerName = "Ekwav", Timestamp = DateTime.UtcNow,
+            Orders = new() { new() { ItemId = "SLOW", Amount = 10, PricePerUnit = 10, Timestamp = DateTime.UtcNow.AddSeconds(-5) },
+                new() { ItemId = "FAST", Amount = 10, PricePerUnit = 10, Timestamp = DateTime.UtcNow.AddSeconds(-5) } } });
+        try
+        {
+            await progressed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.That(orderBookService.Published, Is.Empty, "Publish the complete view after all writes finish");
+        }
+        finally { blocked.TrySetResult(); await refresh; }
+        Assert.That(orderBookService.Published, Has.Count.EqualTo(1));
+        Assert.That(orderBookService.GetUserOrders("1"), Has.Count.EqualTo(2));
     }
 
     [Test, Explicit("Local CPU/allocation comparison for market matching and user snapshots")]

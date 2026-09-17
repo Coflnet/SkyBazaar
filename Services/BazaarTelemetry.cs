@@ -18,6 +18,18 @@ internal static class BazaarTelemetry
     internal static readonly Gauge Ready = Metrics.CreateGauge("sky_bazaar_matching_ready", "Whether the owned-order ledger has loaded");
     internal static readonly Counter PersistenceFailures = Metrics.CreateCounter("sky_bazaar_order_persistence_failures_total", "Failed order ledger writes", new CounterConfiguration { LabelNames = new[] { "operation" } });
 
+    private static readonly double[] LatencyBuckets = { .01, .05, .1, .25, .5, 1, 2, 5, 10, 30, 60 };
+    internal static readonly Histogram MatchDuration = Metrics.CreateHistogram("sky_bazaar_match_duration_seconds",
+        "Successful matching through ledger persistence and snapshot publication attempts, including lock waits", new HistogramConfiguration { LabelNames = new[] { "source" }, Buckets = LatencyBuckets });
+    internal static readonly Histogram ObservationAge = Metrics.CreateHistogram("sky_bazaar_matched_observation_age_seconds",
+        "Source observation age after matching and publication; includes upstream transport delay", new HistogramConfiguration { LabelNames = new[] { "source" }, Buckets = LatencyBuckets });
+
+    internal static void Matched(string source, long started, DateTime observedAt)
+    {
+        MatchDuration.WithLabels(source).Observe(Stopwatch.GetElapsedTime(started).TotalSeconds);
+        ObservationAge.WithLabels(source).Observe(Math.Max(0, (DateTime.UtcNow - observedAt).TotalSeconds));
+    }
+
     internal static void Observation(ILogger logger, string source, string itemTag, DateTime timestamp, string result)
     {
         Observations.WithLabels(source, result).Inc();

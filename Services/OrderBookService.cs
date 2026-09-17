@@ -20,6 +20,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services;
 public class OrderBookService
 {
     private const int OrderBookLoadPageSize = 256;
+    private static readonly ParallelOptions LedgerConcurrency = new() { MaxDegreeOfParallelism = 8 };
     private readonly IMessageApi messageApi;
     private IItemsApi itemsApi;
     private Table<OrderEntry> orderBookTable;
@@ -117,6 +118,7 @@ public class OrderBookService
             BazaarTelemetry.Observation(logger, "direct", update.ItemTag, update.Timestamp, !IsReady ? "loading" : "expired");
             return false;
         }
+        var started = Stopwatch.GetTimestamp();
         var gate = itemLocks.GetOrAdd(update.ItemTag, _ => new(1));
         await gate.WaitAsync();
         try
@@ -134,6 +136,7 @@ public class OrderBookService
             await ApplySide(update.ItemTag, update.SellOrders, true, update.Timestamp, false);
             lastKafkaUpdateTime[update.ItemTag] = update.Timestamp;
             BazaarTelemetry.Observation(logger, "direct", update.ItemTag, update.Timestamp, "applied");
+            BazaarTelemetry.Matched("direct", started, update.Timestamp);
             return true;
         }
         finally { gate.Release(); }
@@ -145,6 +148,7 @@ public class OrderBookService
     {
         if (incoming == null || incoming.Count == 0 && !fullSummary)
             return;
+        var changed = new Dictionary<string, OrderEntry>();
         var book = cache.GetOrAdd(tag, _ => new());
         var side = isSell ? book.Sell : book.Buy;
         side.RemoveAll(o => o.UserId == null && o.Timestamp < DateTime.UtcNow.AddDays(-7));
@@ -199,9 +203,8 @@ public class OrderBookService
                         marketFillTimes[OrderId(order)] = timestamp;
                         if (order.Filled == order.Amount)
                             side.Remove(order);
-                        await UpdateInDb(order);
+                        changed[OrderId(order)] = order;
                         BazaarTelemetry.Transition(logger, order, before, previousEstimate, "market_decrease", timestamp);
-                        await PublishOrders(order);
                     }
                     if (delta == 0)
                         break;
@@ -218,10 +221,16 @@ public class OrderBookService
             order.IsEstimate = false;
             marketFillTimes[OrderId(order)] = timestamp;
             side.Remove(order);
-            await UpdateInDb(order);
+            changed[OrderId(order)] = order;
             BazaarTelemetry.Transition(logger, order, before, previousEstimate, "price_passed", timestamp);
-            await PublishOrders(order);
         }
+        if (changed.Count == 0)
+            return;
+        // Persist each final state once, then publish once per affected user. Keep the item
+        // lock until both complete so a newer observation cannot overtake these writes.
+        await Parallel.ForEachAsync(changed.Values, LedgerConcurrency, async (order, _) => await UpdateInDb(order));
+        await Parallel.ForEachAsync(changed.Values.DistinctBy(o => o.UserId), LedgerConcurrency,
+            async (order, _) => await PublishOrders(order));
     }
 
     public async Task AddOrder(OrderEntry order, bool observed = false, DateTime? observedAt = null)
@@ -374,6 +383,7 @@ public class OrderBookService
             BazaarTelemetry.Observation(logger, "kafka", null, pull.Timestamp, "loading");
             return;
         }
+        var started = Stopwatch.GetTimestamp();
         // Collect all item tags currently in this bazaar pull
         var currentBazaarItems = new HashSet<string>(pull.Products.Select(p => p.ProductId));
 
@@ -407,6 +417,7 @@ public class OrderBookService
 
         // Update last bazaar items for next pull
         lastBazaarItems = currentBazaarItems;
+        BazaarTelemetry.Matched("kafka", started, pull.Timestamp);
     }
 
     public async Task MarkOrderFilled(string itemTag, string userId, double pricePerUnit, int amount)
@@ -477,18 +488,23 @@ public class OrderBookService
                 return;
             }
             // Ownership comes from authenticated player state, never from item lore.
-            foreach (var order in observation.Orders)
+            await Parallel.ForEachAsync(observation.Orders.GroupBy(o => o.ItemId), LedgerConcurrency, async (orders, _) =>
             {
-                order.UserId = observation.UserId;
-                order.PlayerName = observation.PlayerName;
-                await AddOrder(order, observed: true, observedAt: observation.Timestamp);
-            }
+                foreach (var order in orders)
+                {
+                    order.UserId = observation.UserId;
+                    order.PlayerName = observation.PlayerName;
+                    await AddOrder(order, observed: true, observedAt: observation.Timestamp);
+                }
+            });
             var observed = observation.Orders.Select(OrderId).ToHashSet();
-            foreach (var order in IndexedOrders(ordersByUser, observation.UserId).Where(o => o.PlayerName == observation.PlayerName && o.Timestamp <= observation.Timestamp
-                && !observed.Contains(OrderId(o))).ToList())
-                await RemoveOrder(order.ItemId, order.UserId, order.Timestamp, publish: false);
+            var removed = IndexedOrders(ordersByUser, observation.UserId).Where(o => o.PlayerName == observation.PlayerName && o.Timestamp <= observation.Timestamp
+                && !observed.Contains(OrderId(o))).ToList();
+            await Parallel.ForEachAsync(removed, LedgerConcurrency,
+                async (order, _) => await RemoveOrder(order.ItemId, order.UserId, order.Timestamp, publish: false));
             await PublishOrders(new() { UserId = observation.UserId, PlayerName = observation.PlayerName });
             playerObservationTimes[player] = observation.Timestamp;
+            BazaarTelemetry.Matched("personal", started, observation.Timestamp);
             var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
             logger.Log(elapsed > 1000 ? LogLevel.Information : LogLevel.Debug,
                 "Reconciled {OrderCount} orders for {UserId}/{PlayerName} at {ObservedAt:o} in {ElapsedMs} ms, observation age {AgeMs} ms; TraceId {TraceId}",

@@ -69,17 +69,6 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             return Kafka.KafkaConsumer.ConsumeBatch<BazaarPull>(config, config["TOPICS:BAZAAR"], async bazaar =>
             {
                 consumeCounter.Inc();
-                var session = await bazaarService.GetSession();
-                Console.WriteLine($"retrieved batch {bazaar.Count()}, start processing");
-                try
-                {
-                    await bazaarService.AddEntry(bazaar, session);
-                }
-                catch (Exception e)
-                {
-                    logger.LogError(e, "saving bazaar batch");
-                    throw;
-                }
                 foreach (var b in bazaar)
                 {
                     if (b.Timestamp < DateTime.Now - TimeSpan.FromHours(2))
@@ -95,6 +84,18 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     {
                         logger.LogError(e, "orderbook check");
                     }
+                }
+                // Matching must not wait for historical price storage.
+                var session = await bazaarService.GetSession();
+                Console.WriteLine($"retrieved batch {bazaar.Count()}, start processing");
+                try
+                {
+                    await bazaarService.AddEntry(bazaar, session);
+                }
+                catch (Exception e)
+                {
+                    logger.LogError(e, "saving bazaar batch");
+                    throw;
                 }
                 await bazaarService.CheckAggregation(session, bazaar);
             }, stoppingToken, config["KAFKA:CONSUMER_GROUP"], 5);
