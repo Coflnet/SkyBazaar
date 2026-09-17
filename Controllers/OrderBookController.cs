@@ -104,6 +104,16 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
             return await service.UpdateOrderBook(update);
         }
 
+        /// <summary>Matches an instant buy reported in chat without waiting for the public API.</summary>
+        [HttpPost("instant-buy")]
+        public async Task<IActionResult> InstantBuy(InstantBuyObservation observation)
+        {
+            if (string.IsNullOrWhiteSpace(observation.ItemTag) || observation.Amount <= 0
+                || !double.IsFinite(observation.Coins) || observation.Coins <= 0)
+                return BadRequest();
+            return Ok(await service.ObserveInstantBuy(observation));
+        }
+
         /// <summary>Reconciles a player's orders observed through a description upload.</summary>
         [HttpPost("player")]
         public async Task<IActionResult> ObservePlayerOrders(PlayerOrderObservation observation)

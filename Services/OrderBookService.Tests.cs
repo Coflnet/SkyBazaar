@@ -68,6 +68,64 @@ public class OrderBookServiceTests
     }
 
     [Test]
+    public async Task InstantBuyUsesFifoAndPublishesAllOwnersWithoutDoubleCountingNextSnapshot()
+    {
+        var time = DateTime.UtcNow.AddSeconds(-3);
+        await orderBookService.AddLoadedOrder(new() { UserId = "first", ItemId = "GILL_MEMBRANE", Amount = 2,
+            IsSell = true, PricePerUnit = 81.9, Timestamp = time.AddMinutes(-2) });
+        await orderBookService.AddLoadedOrder(new() { UserId = "second", ItemId = "GILL_MEMBRANE", Amount = 4,
+            IsSell = true, PricePerUnit = 81.9, Timestamp = time.AddMinutes(-1) });
+        await orderBookService.AddLoadedOrder(new() { UserId = "buyer", ItemId = "GILL_MEMBRANE", Amount = 4,
+            PricePerUnit = 80, Timestamp = time.AddMinutes(-1) });
+        var buy = new InstantBuyObservation { ItemTag = "GILL_MEMBRANE", Amount = 3, Coins = 245.7, Timestamp = time };
+        Assert.That(await orderBookService.ObserveInstantBuy(buy), Is.True);
+        Assert.That(orderBookService.GetUserOrders("first").Single().Filled, Is.EqualTo(2));
+        Assert.That(orderBookService.GetUserOrders("second").Single().Filled, Is.EqualTo(1));
+        Assert.That(orderBookService.GetUserOrders("first").Single().IsEstimate, Is.True);
+        Assert.That(orderBookService.GetUserOrders("buyer").Single().Filled, Is.Zero);
+        Assert.That(orderBookService.Published.Select(p => p.UserId), Is.EquivalentTo(new[] { "first", "second" }));
+        Assert.That(await orderBookService.ObserveInstantBuy(buy), Is.False);
+        Assert.That(await orderBookService.UpdateOrderBook(new() { ItemTag = buy.ItemTag, Timestamp = time.AddTicks(-1),
+            SellOrders = new() { new() { PricePerUnit = 81.9, Amount = 6 } } }), Is.False);
+        await orderBookService.UpdateOrderBook(new() { ItemTag = buy.ItemTag, Timestamp = time.AddSeconds(1),
+            SellOrders = new() { new() { PricePerUnit = 81.9, Amount = 3 } } });
+        Assert.That(orderBookService.GetUserOrders("second").Single().Filled, Is.EqualTo(1));
+        Assert.That(orderBookService.Published, Has.Count.EqualTo(2));
+    }
+
+    [TestCase(2, 30, true)]
+    [TestCase(3, 50, true)]
+    [TestCase(1, 20, false)]
+    [TestCase(4, 70, false)]
+    public async Task InstantBuyChecksMultiLevelPriceAndAnonymousLiquidity(int amount, double coins, bool applied)
+    {
+        var time = DateTime.UtcNow.AddSeconds(-1);
+        await orderBookService.AddOrder(new() { ItemId = "GILL_MEMBRANE", Amount = 1, IsSell = true,
+            PricePerUnit = 10, Timestamp = time.AddMinutes(-3) });
+        await orderBookService.AddLoadedOrder(new() { UserId = "seller", ItemId = "GILL_MEMBRANE", Amount = 2,
+            IsSell = true, PricePerUnit = 20, Timestamp = time.AddMinutes(-2) });
+        await orderBookService.AddLoadedOrder(new() { UserId = "expired", ItemId = "GILL_MEMBRANE", Amount = 100,
+            IsSell = true, IsExpired = true, PricePerUnit = 1, Timestamp = time.AddMinutes(-2) });
+        Assert.That(await orderBookService.ObserveInstantBuy(new() { ItemTag = "GILL_MEMBRANE", Amount = amount,
+            Coins = coins, Timestamp = time }), Is.EqualTo(applied));
+        Assert.That(orderBookService.GetUserOrders("seller").Single().Filled, Is.EqualTo(applied ? amount - 1 : 0));
+        Assert.That(orderBookService.GetUserOrders("expired").Single().Filled, Is.Zero);
+    }
+
+    [TestCase(-11, true)]
+    [TestCase(5, true)]
+    [TestCase(-1, false)]
+    public async Task InstantBuyDropsStaleFutureAndLoadingObservations(int seconds, bool ready)
+    {
+        await orderBookService.AddLoadedOrder(new() { UserId = "seller", ItemId = "GILL_MEMBRANE", Amount = 2,
+            IsSell = true, PricePerUnit = 81.9, Timestamp = DateTime.UtcNow.AddMinutes(-1) });
+        orderBookService.Ready = ready;
+        Assert.That(await orderBookService.ObserveInstantBuy(new() { ItemTag = "GILL_MEMBRANE", Amount = 1,
+            Coins = 81.9, Timestamp = DateTime.UtcNow.AddSeconds(seconds) }), Is.False);
+        Assert.That(orderBookService.GetUserOrders("seller").Single().Filled, Is.Zero);
+    }
+
+    [Test]
     public async Task TriggerMessageTest()
     {
         itemsApiMock.Setup(i => i.ItemNamesGetAsync(0, default)).ReturnsAsync(new List<Items.Client.Model.ItemPreview>() { new() { Tag = "test", Name = "test" } });

@@ -241,3 +241,25 @@ matching claim chat consumes them, instead of relying on upload timestamp orderi
 That credit survives persistence, repeated menus do not increase it, and subsequent genuine
 claims still reduce the remainder. Reopening the orders view restores an already removed
 order from its current lore; no ledger migration or mod update is needed for this fix.
+
+### Instant buys and canonical shard IDs
+
+`SkyModCommands` forwards `[Bazaar] Bought ...` directly to `POST /OrderBook/instant-buy`
+while the existing Kafka chat path continues recording transactions in `SkyUserState`.
+The request carries the item ID, quantity, total coins (including decimals), and chat-receipt timestamp.
+`SkyBazaar` consumes sell liquidity through the existing FIFO matcher only when its known book
+explains both quantity and total price (within 0.11 coins for display rounding). These fills remain
+estimates; chat does not identify the individual sellers. A later price or personal observation
+confirms/corrects them. All affected users receive the usual snapshots.
+
+Requests older than ten seconds, in the future, already covered by a newer observation, or received
+while loading are dropped. No retry queue is used. An older Bazaar returns 404, which ModCommands
+tolerates during rolling deployments. Watch `sky_bazaar_observations_total{source="instant_buy"}`
+for `applied`, `book_mismatch`, `expired`, `loading`, and `out_of_order`; the matching duration and
+observation-age histograms also include `source="instant_buy"`. A missing or mismatched book still
+waits for ordinary observations, so the fast path does not guarantee an immediate fill in every case.
+
+SkyApi now forwards canonical shard IDs from its existing description parser to player-state uploads.
+Special shard resolution no longer depends on exactly one NBT metadata field. UserState chat lookups
+use the shared shard-name mapping before cached search results. Reopening the orders menu repairs
+previously registered generic shard IDs through the normal personal-state reconciliation.

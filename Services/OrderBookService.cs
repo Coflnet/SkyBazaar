@@ -142,9 +142,59 @@ public class OrderBookService
         finally { gate.Release(); }
     }
 
+    public async Task<bool> ObserveInstantBuy(InstantBuyObservation buy)
+    {
+        using var span = BazaarTelemetry.Source.StartActivity("bazaar.observe.instant_buy");
+        span?.SetTag("bazaar.item_tag", buy.ItemTag);
+        var started = Stopwatch.GetTimestamp();
+        var gate = itemLocks.GetOrAdd(buy.ItemTag, _ => new(1));
+        await gate.WaitAsync();
+        try
+        {
+            var now = DateTime.UtcNow;
+            var reason = !IsReady ? "loading" : buy.Timestamp < now.AddSeconds(-10) ? "expired"
+                : buy.Timestamp > now ? "future"
+                : lastKafkaUpdateTime.TryGetValue(buy.ItemTag, out var last) && buy.Timestamp <= last ? "out_of_order" : null;
+            if (reason != null)
+            {
+                BazaarTelemetry.Observation(logger, "instant_buy", buy.ItemTag, buy.Timestamp, reason);
+                return false;
+            }
+            var book = cache.GetValueOrDefault(buy.ItemTag, new());
+            var levels = book.Sell.Where(o => !o.IsExpired && o.Timestamp <= buy.Timestamp
+                    && o.Timestamp > buy.Timestamp.AddDays(-7))
+                .GroupBy(o => Math.Round(o.PricePerUnit, 1)).OrderBy(g => g.Key)
+                .Select(g => new OrderEntry { PricePerUnit = g.Key, Amount = g.Sum(o => o.Amount - o.Filled) }).ToList();
+            var remaining = buy.Amount;
+            double cost = 0;
+            foreach (var level in levels)
+            {
+                var taken = Math.Min(remaining, level.Amount);
+                cost += taken * level.PricePerUnit;
+                level.Amount -= taken;
+                remaining -= taken;
+            }
+            // Only allocate when the known book can explain the trade's quantity AND total price.
+            // A chat receipt doesn't identify individual sellers, so these remain estimates.
+            if (remaining != 0 || Math.Abs(cost - buy.Coins) > .11)
+            {
+                logger.LogDebug("Instant buy book mismatch for {ItemTag}: amount {Amount}, coins {Coins}, unallocated {Remaining}, known cost {Cost}",
+                    buy.ItemTag, buy.Amount, buy.Coins, remaining, cost);
+                BazaarTelemetry.Observation(logger, "instant_buy", buy.ItemTag, buy.Timestamp, "book_mismatch");
+                return false;
+            }
+            await ApplySide(buy.ItemTag, levels, true, buy.Timestamp, false, instantBuy: true);
+            lastKafkaUpdateTime[buy.ItemTag] = buy.Timestamp;
+            BazaarTelemetry.Observation(logger, "instant_buy", buy.ItemTag, buy.Timestamp, "applied");
+            BazaarTelemetry.Matched("instant_buy", started, buy.Timestamp);
+            return true;
+        }
+        finally { gate.Release(); }
+    }
+
     // Public observations are aggregate price levels. Match decreases against the FIFO queue;
     // never replace a player's original order amount with the aggregate amount at that price.
-    private async Task ApplySide(string tag, List<OrderEntry> incoming, bool isSell, DateTime timestamp, bool fullSummary)
+    private async Task ApplySide(string tag, List<OrderEntry> incoming, bool isSell, DateTime timestamp, bool fullSummary, bool instantBuy = false)
     {
         if (incoming == null || incoming.Count == 0 && !fullSummary)
             return;
@@ -204,7 +254,7 @@ public class OrderBookService
                         if (order.Filled == order.Amount)
                             side.Remove(order);
                         changed[OrderId(order)] = order;
-                        BazaarTelemetry.Transition(logger, order, before, previousEstimate, "market_decrease", timestamp);
+                        BazaarTelemetry.Transition(logger, order, before, previousEstimate, instantBuy ? "instant_buy" : "market_decrease", timestamp);
                     }
                     if (delta == 0)
                         break;
@@ -213,7 +263,7 @@ public class OrderBookService
         }
         foreach (var order in IndexedOrders(ordersByItem, tag).Where(o => o.IsSell == isSell
             && !o.IsExpired && o.Timestamp > timestamp.AddDays(-7) && o.Timestamp <= timestamp && (o.Filled < o.Amount || o.IsEstimate != false)
-            && PricePassed(Math.Round(o.PricePerUnit, 1))).ToList())
+            && !instantBuy && PricePassed(Math.Round(o.PricePerUnit, 1))).ToList())
         {
             var before = order.Filled;
             var previousEstimate = order.IsEstimate;
