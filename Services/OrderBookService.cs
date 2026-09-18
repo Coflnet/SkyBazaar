@@ -459,9 +459,33 @@ public class OrderBookService
         });
 
         var itemsToRemove = lastBazaarItems.Except(currentBazaarItems).ToHashSet();
-        foreach (var order in AllUserOrders.Where(o => itemsToRemove.Contains(o.ItemId)
-            || o.Timestamp < DateTime.UtcNow.AddDays(-7)).ToList())
+        foreach (var order in AllUserOrders.Where(o => itemsToRemove.Contains(o.ItemId)).ToList())
             await RemoveOrder(order.ItemId, order.UserId, order.Timestamp);
+
+        // Seven days ends matching, not ownership: expired orders can still contain unclaimed
+        // items/coins. Keep them in the personal ledger until a claim or personal view removes them.
+        var expiry = DateTime.UtcNow.AddDays(-7);
+        var expiredItems = AllUserOrders.Where(o => !o.IsExpired && o.Timestamp <= expiry)
+            .Select(o => o.ItemId).Distinct().ToList();
+        foreach (var itemTag in expiredItems)
+        {
+            var gate = itemLocks.GetOrAdd(itemTag, _ => new(1));
+            await gate.WaitAsync();
+            try
+            {
+                foreach (var order in IndexedOrders(ordersByItem, itemTag).Where(o => !o.IsExpired && o.Timestamp <= expiry))
+                {
+                    order.IsExpired = true;
+                    if (cache.TryGetValue(itemTag, out var book))
+                        book.Remove(order);
+                    marketFillTimes.TryRemove(OrderId(order), out _);
+                    await InsertToDb(order);
+                    BazaarTelemetry.Transition(logger, order, order.Filled, order.IsEstimate, "expired", DateTime.UtcNow);
+                    await PublishOrders(order);
+                }
+            }
+            finally { gate.Release(); }
+        }
         foreach (var itemTag in itemsToRemove)
             cache.TryRemove(itemTag, out _);
 

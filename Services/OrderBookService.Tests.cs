@@ -1333,6 +1333,64 @@ public class OrderBookServiceTests
         Assert.That(orders.Single(o => o.ItemId == "OTHER").Filled, Is.EqualTo(32));
     }
 
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task MarketPollKeepsExpiredUnclaimedOrdersUntilPersonalViewRemovesThem(bool loaded)
+    {
+        var now = DateTime.UtcNow;
+        var order = new OrderEntry { UserId = "7", PlayerName = "Ekwav", ItemId = "SHARD_HIDEONWALL",
+            IsSell = true, Amount = 129, Filled = 129, Claimed = 64, PricePerUnit = 197783,
+            Timestamp = now.AddDays(-12), IsExpired = true, IsEstimate = false };
+        if (loaded)
+            await orderBookService.AddLoadedOrder(order);
+        else
+            await orderBookService.ObservePlayerOrders(new() { UserId = "7", PlayerName = "Ekwav",
+                Timestamp = now, Orders = new() { order } });
+
+        for (var i = 0; i < 2; i++)
+            await orderBookService.BazaarPull(new() { Timestamp = now.AddSeconds(i), Products = new() {
+                new() { ProductId = order.ItemId, BuySummery = new(), SellSummary = new() } } });
+
+        var saved = orderBookService.GetUserOrders("7").Single();
+        Assert.That(saved.Filled, Is.EqualTo(129));
+        Assert.That(saved.Claimed, Is.EqualTo(64));
+        Assert.That(saved.IsExpired, Is.True);
+        Assert.That(orderBookService.RemovedOrder, Is.Null);
+        Assert.That((await orderBookService.GetOrderBook(order.ItemId)).Sell, Is.Empty);
+        messageApiMock.Verify(m => m.MessageSendUserIdPostAsync(It.IsAny<string>(), It.IsAny<MessageContainer>(), 0, default), Times.Never);
+
+        await orderBookService.ObservePlayerOrders(new() { UserId = "7", PlayerName = "Ekwav",
+            Timestamp = now.AddSeconds(3), Orders = new() });
+        Assert.That(orderBookService.GetUserOrders("7"), Is.Empty);
+    }
+
+    [Test]
+    public async Task MarketPollMarksNewlyExpiredOrdersWithoutChangingFillOrClaimState()
+    {
+        var now = DateTime.UtcNow;
+        var order = new OrderEntry { UserId = "7", PlayerName = "Ekwav", ItemId = "WHEAT",
+            Amount = 129, Filled = 91, Claimed = 40, PricePerUnit = 10, Timestamp = now.AddDays(-8) };
+        await orderBookService.AddOrder(order);
+        // Simulate a tracked row whose expiry flag has not yet been updated.
+        order.IsExpired = false;
+        order.IsEstimate = true;
+        OrderEntry persisted = null;
+        orderBookService.OnWrite = entry => { persisted = entry.Copy(); return Task.CompletedTask; };
+        var publications = orderBookService.Published.Count;
+        for (var i = 0; i < 2; i++)
+            await orderBookService.BazaarPull(new() { Timestamp = now.AddSeconds(i), Products = new() {
+                new() { ProductId = order.ItemId, BuySummery = new(), SellSummary = new() } } });
+
+        Assert.That(order.IsExpired, Is.True);
+        Assert.That(order.Filled, Is.EqualTo(91));
+        Assert.That(order.Claimed, Is.EqualTo(40));
+        Assert.That(order.IsEstimate, Is.True);
+        Assert.That(orderBookService.GetUserOrders("7"), Has.Count.EqualTo(1));
+        Assert.That(persisted.IsExpired, Is.True);
+        Assert.That(orderBookService.Published.Count, Is.EqualTo(publications + 1));
+        Assert.That((await orderBookService.GetOrderBook(order.ItemId)).Buy.All(o => o.UserId == null), Is.True);
+    }
+
     [Test]
     public async Task SevenDayExpiryStopsMatchingWithoutAnotherMenuUpload()
     {
