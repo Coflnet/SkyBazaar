@@ -16,6 +16,8 @@ public class OrderEntry
     public bool IsVerfified { get; set; }
     public int Filled { get; set; }
     public bool IsExpired { get; set; }
+    /// <summary>Best known price, including ties; null until evaluated or no longer active.</summary>
+    public bool? IsTopOrder { get; set; }
     /// <summary>Items already withdrawn; null when claim history is unknown.</summary>
     public int? Claimed { get; set; }
     /// <summary>True (or unknown for legacy rows) until an observation confirms the fill.</summary>

@@ -67,6 +67,86 @@ public class OrderBookServiceTests
         orderBookService = new NoDbOrderBookService(container.Object, messageApiMock.Object, itemsApiMock.Object, NullLogger<OrderBookService>.Instance);
     }
 
+    [TestCase(true, true)]
+    [TestCase(true, false)]
+    [TestCase(false, true)]
+    [TestCase(false, false)]
+    public async Task TopPriceChangesPublishAllOwnersWithoutFillChanges(bool sell, bool kafka)
+    {
+        var time = DateTime.UtcNow.AddSeconds(-8);
+        for (var i = 0; i < 2; i++)
+            await orderBookService.AddOrder(new() { UserId = "owner" + i, ItemId = "WHEAT",
+                Amount = 10, IsSell = sell, PricePerUnit = 10, Timestamp = time.AddTicks(i * 10000), HasBeenNotified = true });
+        Assert.That(orderBookService.GetUserOrders("owner0").Single().IsTopOrder, Is.True);
+        Assert.That(orderBookService.GetUserOrders("owner1").Single().IsTopOrder, Is.True, "Equal prices share top status");
+        var writes = 0;
+        orderBookService.OnWrite = _ => { writes++; return Task.CompletedTask; };
+        async Task Observe(bool competitor, int seconds)
+        {
+            var levels = new List<OrderEntry> { new() { PricePerUnit = 10, Amount = 20 } };
+            if (competitor)
+                levels.Add(new() { PricePerUnit = sell ? 9 : 11, Amount = 1 });
+            if (kafka)
+                await orderBookService.BazaarPull(new() { Timestamp = time.AddSeconds(seconds), Products = new() {
+                    new() { ProductId = "WHEAT",
+                        BuySummery = sell ? levels.Select(o => new dev.BuyOrder { PricePerUnit = o.PricePerUnit, Amount = o.Amount }).ToList() : new(),
+                        SellSummary = sell ? new() : levels.Select(o => new dev.SellOrder { PricePerUnit = o.PricePerUnit, Amount = o.Amount }).ToList() } } });
+            else
+                await orderBookService.UpdateOrderBook(new() { ItemTag = "WHEAT", Timestamp = time.AddSeconds(seconds),
+                    SellOrders = sell ? levels : null, BuyOrders = sell ? null : levels });
+        }
+        orderBookService.Published.Clear();
+        await Observe(true, 1);
+        Assert.That(orderBookService.Published.Select(p => p.UserId), Is.EquivalentTo(new[] { "owner0", "owner1" }));
+        Assert.That(orderBookService.GetUserOrders("owner0").Single().IsTopOrder, Is.False);
+        orderBookService.Published.Clear();
+        await Observe(true, 2);
+        Assert.That(orderBookService.Published, Is.Empty, "Unchanged top price must not spam snapshots");
+        await Observe(false, 3);
+        Assert.That(orderBookService.Published.Select(p => p.UserId), Is.EquivalentTo(new[] { "owner0", "owner1" }));
+        foreach (var user in new[] { "owner0", "owner1" })
+        {
+            var order = orderBookService.GetUserOrders(user).Single();
+            Assert.That(order.IsTopOrder, Is.True);
+            Assert.That(order.Filled, Is.Zero);
+        }
+        Assert.That(writes, Is.Zero, "Position-only changes must not write the ledger");
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task ChatAndPersonalOrdersRefreshOtherOwnersWhenAddedAndRemoved(bool observed)
+    {
+        var time = DateTime.UtcNow.AddMinutes(-1);
+        await orderBookService.AddOrder(new() { UserId = "old", ItemId = "WHEAT", Amount = 10,
+            IsSell = true, PricePerUnit = 10, Timestamp = time });
+        orderBookService.Published.Clear();
+        await orderBookService.AddOrder(new() { UserId = "new", ItemId = "WHEAT", Amount = 10,
+            IsSell = true, PricePerUnit = 9, Timestamp = time.AddSeconds(1) }, observed);
+        Assert.That(orderBookService.GetUserOrders("old").Single().IsTopOrder, Is.False);
+        Assert.That(orderBookService.Published.Any(p => p.UserId == "old"), Is.True);
+        orderBookService.Published.Clear();
+        await orderBookService.RemoveOrder("WHEAT", "new", time.AddSeconds(1), publish: !observed);
+        Assert.That(orderBookService.GetUserOrders("old").Single().IsTopOrder, Is.True);
+        Assert.That(orderBookService.Published.Any(p => p.UserId == "old"), Is.True);
+    }
+
+    [Test]
+    public async Task InstantBuyPromotesNextPriceAndClearsCompletedTopStatus()
+    {
+        var time = DateTime.UtcNow.AddSeconds(-3);
+        await orderBookService.AddOrder(new() { UserId = "first", ItemId = "WHEAT", Amount = 1,
+            IsSell = true, PricePerUnit = 9, Timestamp = time.AddMinutes(-1) });
+        await orderBookService.AddOrder(new() { UserId = "second", ItemId = "WHEAT", Amount = 1,
+            IsSell = true, PricePerUnit = 10, Timestamp = time });
+        Assert.That(orderBookService.GetUserOrders("second").Single().IsTopOrder, Is.False);
+        orderBookService.Published.Clear();
+        await orderBookService.ObserveInstantBuy(new() { ItemTag = "WHEAT", Amount = 1, Coins = 9, Timestamp = time.AddSeconds(1) });
+        Assert.That(orderBookService.GetUserOrders("first").Single().IsTopOrder, Is.Null);
+        Assert.That(orderBookService.GetUserOrders("second").Single().IsTopOrder, Is.True);
+        Assert.That(orderBookService.Published.Select(p => p.UserId), Is.EquivalentTo(new[] { "first", "second" }));
+    }
+
     [Test]
     public async Task InstantBuyUsesFifoAndPublishesAllOwnersWithoutDoubleCountingNextSnapshot()
     {
@@ -1502,7 +1582,7 @@ public class OrderBookServiceTests
             for (var order = 0; order < 2; order++)
                 await orderBookService.AddLoadedOrder(new() { UserId = "user-" + user, ItemId = "WHEAT",
                     Amount = 10, PricePerUnit = 10, IsSell = sell, Timestamp = time.AddMilliseconds(order) });
-        await orderBookService.AddLoadedOrder(new() { UserId = "unaffected", ItemId = "OTHER",
+        await orderBookService.AddOrder(new() { UserId = "unaffected", ItemId = "OTHER",
             Amount = 10, PricePerUnit = 10, Timestamp = time });
         orderBookService.Published.Clear();
         var writes = new ConcurrentBag<OrderEntry>();

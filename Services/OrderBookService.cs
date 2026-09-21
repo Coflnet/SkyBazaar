@@ -225,7 +225,7 @@ public class OrderBookService
             {
                 // Preserve the queue position of older liquidity when new orders arrive.
                 await AddOrderInternal(new OrderEntry { ItemId = tag, IsSell = isSell,
-                    PricePerUnit = price, Amount = delta, Timestamp = timestamp });
+                    PricePerUnit = price, Amount = delta, Timestamp = timestamp }, publish: false);
             }
             else if (delta < 0)
             {
@@ -274,13 +274,41 @@ public class OrderBookService
             changed[OrderId(order)] = order;
             BazaarTelemetry.Transition(logger, order, before, previousEstimate, "price_passed", timestamp);
         }
-        if (changed.Count == 0)
+        var topChanges = RefreshTopOrders(tag, isSell);
+        if (changed.Count == 0 && topChanges.Count == 0)
             return;
-        // Persist each final state once, then publish once per affected user. Keep the item
-        // lock until both complete so a newer observation cannot overtake these writes.
+        // Persist fill changes only; publish price-position changes even without new fills.
+        // Keep the item lock until publication so a newer observation cannot overtake it.
         await Parallel.ForEachAsync(changed.Values, LedgerConcurrency, async (order, _) => await UpdateInDb(order));
-        await Parallel.ForEachAsync(changed.Values.DistinctBy(o => o.UserId), LedgerConcurrency,
+        await Parallel.ForEachAsync(changed.Values.Concat(topChanges).DistinctBy(o => o.UserId), LedgerConcurrency,
             async (order, _) => await PublishOrders(order));
+    }
+
+    // Called under the item lock, once per completed side update. This is transient market
+    // state: do not persist it or reuse the one-shot outbid notification flag.
+    private List<OrderEntry> RefreshTopOrders(string tag, bool isSell)
+    {
+        var changed = new List<OrderEntry>();
+        if (!ordersByItem.TryGetValue(tag, out var owned) || owned.IsEmpty || !cache.TryGetValue(tag, out var book))
+            return changed;
+        var expiry = DateTime.UtcNow.AddDays(-7);
+        var side = isSell ? book.Sell : book.Buy;
+        var prices = side.Where(o => !o.IsExpired && o.Filled < o.Amount && o.Timestamp > expiry)
+            .Select(o => Math.Round(o.PricePerUnit, 1));
+        var best = isSell ? prices.DefaultIfEmpty(double.PositiveInfinity).Min()
+            : prices.DefaultIfEmpty(double.NegativeInfinity).Max();
+        foreach (var order in owned.Select(p => p.Value).Where(o => o.IsSell == isSell))
+        {
+            bool? top = !order.IsExpired && order.Filled < order.Amount && order.Timestamp > expiry
+                ? Math.Round(order.PricePerUnit, 1) == best : null;
+            if (order.IsTopOrder == top)
+                continue;
+            order.IsTopOrder = top;
+            changed.Add(order);
+            logger.LogDebug("Bazaar top price changed for {OrderId}: {IsTopOrder}, best price {BestPrice}",
+                OrderId(order), top, best);
+        }
+        return changed;
     }
 
     public async Task AddOrder(OrderEntry order, bool observed = false, DateTime? observedAt = null)
@@ -291,7 +319,7 @@ public class OrderBookService
         finally { gate.Release(); }
     }
 
-    private async Task AddOrderInternal(OrderEntry order, bool observed = false, DateTime? observedAt = null)
+    private async Task AddOrderInternal(OrderEntry order, bool observed = false, DateTime? observedAt = null, bool publish = true)
     {
         if (order.Amount <= 0)
             return;
@@ -332,6 +360,7 @@ public class OrderBookService
                 if (order.IsExpired || observedAt.HasValue && !newerMarketFill)
                     marketFillTimes.TryRemove(OrderId(order), out _);
                 order.HasBeenNotified = existing.HasBeenNotified;
+                order.IsTopOrder = existing.IsTopOrder;
             }
             else if (!order.IsExpired)
             {
@@ -347,8 +376,15 @@ public class OrderBookService
             await InsertToDb(order);
             if (created || before != order.Filled || previousEstimate != order.IsEstimate || previousExpired != order.IsExpired)
                 BazaarTelemetry.Transition(logger, order, before, previousEstimate, created ? "registered" : observed ? "personal_view" : "chat", observedAt ?? DateTime.UtcNow);
-            if (!observed)
-                await PublishOrders(order, created && order.Filled == 0);
+        }
+        if (publish)
+        {
+            var changed = RefreshTopOrders(order.ItemId, order.IsSell);
+            if (order.UserId != null)
+                changed.Insert(0, order);
+            await Parallel.ForEachAsync(changed.Where(o => !observed || o.UserId != order.UserId)
+                .DistinctBy(o => o.UserId), LedgerConcurrency,
+                async (affected, _) => await PublishOrders(affected, affected.UserId == order.UserId && created && order.Filled == 0));
         }
         foreach (var outbid in outbidOrders)
         {
@@ -476,6 +512,7 @@ public class OrderBookService
                 foreach (var order in IndexedOrders(ordersByItem, itemTag).Where(o => !o.IsExpired && o.Timestamp <= expiry))
                 {
                     order.IsExpired = true;
+                    order.IsTopOrder = null;
                     if (cache.TryGetValue(itemTag, out var book))
                         book.Remove(order);
                     marketFillTimes.TryRemove(OrderId(order), out _);
@@ -511,7 +548,10 @@ public class OrderBookService
                 await UpdateInDb(order);
                 if (before != order.Filled || previousEstimate != false)
                     BazaarTelemetry.Transition(logger, order, before, previousEstimate, "legacy_confirmed", DateTime.UtcNow);
-                await PublishOrders(order);
+                var changed = RefreshTopOrders(itemTag, order.IsSell);
+                changed.Add(order);
+                await Parallel.ForEachAsync(changed.DistinctBy(o => o.UserId), LedgerConcurrency,
+                    async (affected, _) => await PublishOrders(affected));
             }
         }
         finally { gate.Release(); }
@@ -537,8 +577,11 @@ public class OrderBookService
                 BazaarTelemetry.Transition(logger, order, order.Filled, order.IsEstimate, "removed", DateTime.UtcNow);
                 if (cache.TryGetValue(itemTag, out var book))
                     book.Remove(order);
+                var changed = RefreshTopOrders(itemTag, order.IsSell);
                 if (publish)
-                    await PublishOrders(order);
+                    changed.Add(order);
+                await Parallel.ForEachAsync(changed.Where(o => publish || o.UserId != userId).DistinctBy(o => o.UserId),
+                    LedgerConcurrency, async (affected, _) => await PublishOrders(affected));
             }
         }
         finally { gate.Release(); }
@@ -708,6 +751,7 @@ public class OrderBookService
                 .Column(o => o.IsEstimate, cm => cm.WithName("is_estimate"))
                 .Column(o => o.IsExpired, cm => cm.WithName("is_expired"))
                 .Column(o => o.Claimed, cm => cm.WithName("claimed"))
+                .Column(o => o.IsTopOrder, cm => cm.Ignore())
             );
         ArgumentNullException.ThrowIfNull(sessionContainer.Session);
         orderBookTable = new Table<OrderEntry>(sessionContainer.Session, mapping);
