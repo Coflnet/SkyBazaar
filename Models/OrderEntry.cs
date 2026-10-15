@@ -16,6 +16,8 @@ public class OrderEntry
     public bool IsVerfified { get; set; }
     public int Filled { get; set; }
     public bool IsExpired { get; set; }
+    /// <summary>Closed order history is retained for seven days; null for active or legacy rows.</summary>
+    public DateTime? ClosedAt { get; set; }
     /// <summary>Best known price, including ties; null until evaluated or no longer active.</summary>
     public bool? IsTopOrder { get; set; }
     /// <summary>Items already withdrawn; null when claim history is unknown.</summary>

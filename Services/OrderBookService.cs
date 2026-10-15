@@ -20,6 +20,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services;
 public class OrderBookService
 {
     private const int OrderBookLoadPageSize = 256;
+    private static readonly TimeSpan ClosedRetention = TimeSpan.FromDays(7);
     private static readonly ParallelOptions LedgerConcurrency = new() { MaxDegreeOfParallelism = 8 };
     private readonly IMessageApi messageApi;
     private IItemsApi itemsApi;
@@ -54,16 +55,20 @@ public class OrderBookService
         ordersByUser.GetOrAdd(order.UserId, _ => new())[id] = order;
     }
 
-    internal List<OrderEntry> GetUserOrders(string userId) => IndexedOrders(ordersByUser, userId).Select(o => o.Copy()).ToList();
+    internal List<OrderEntry> GetUserOrders(string userId) => IndexedOrders(ordersByUser, userId)
+        .Where(o => !o.ClosedAt.HasValue).Select(o => o.Copy()).ToList();
+
+    internal List<OrderEntry> GetSnapshotOrders(string userId) => IndexedOrders(ordersByUser, userId)
+        .Where(o => !o.ClosedAt.HasValue || o.ClosedAt > DateTime.UtcNow - ClosedRetention).Select(o => o.Copy()).ToList();
 
     internal Task<string> GetSnapshot(string userId) =>
-        publisher.Publish(userId, null, false, () => GetUserOrders(userId), notify: false);
+        publisher.Publish(userId, null, false, () => GetSnapshotOrders(userId), notify: false);
 
     internal static string OrderId(OrderEntry o) => $"{o.UserId}:{o.ItemId}:{o.Timestamp.Ticks}:{o.IsSell}";
 
     protected virtual Task PublishOrders(OrderEntry changed, bool created = false) =>
         publisher.Publish(changed.UserId, changed.PlayerName, created,
-            () => GetUserOrders(changed.UserId));
+            () => GetSnapshotOrders(changed.UserId));
 
     public OrderBookService(ISessionContainer service, IMessageApi messageApi, IItemsApi itemsApi, ILogger<OrderBookService> logger, BazaarOrderPublisher publisher)
     {
@@ -344,13 +349,19 @@ public class OrderBookService
                 previousExpired = existing.IsExpired;
                 side.Remove(existing);
                 order.IsExpired |= existing.IsExpired;
-                if (!observed && existing.Claimed.HasValue)
+                order.ClosedAt = existing.ClosedAt ?? order.ClosedAt;
+                if ((!observed || existing.ClosedAt.HasValue) && existing.Claimed.HasValue)
                     order.Claimed = Math.Max(order.Claimed ?? 0, existing.Claimed.Value);
                 else
                     order.Claimed ??= existing.Claimed;
+                if (existing.ClosedAt.HasValue && order.Claimed > (existing.Claimed ?? 0))
+                {
+                    var claimedAt = observedAt ?? DateTime.UtcNow;
+                    if (claimedAt > order.ClosedAt.Value) order.ClosedAt = claimedAt;
+                }
                 var newerMarketFill = observedAt.HasValue && marketFillTimes.TryGetValue(OrderId(order), out var marketTime)
                     && observedAt.Value < marketTime;
-                if ((!observed && order.Filled < existing.Filled) || !order.IsExpired && newerMarketFill)
+                if (((!observed || existing.ClosedAt.HasValue) && order.Filled < existing.Filled) || !order.IsExpired && newerMarketFill)
                 {
                     logger.LogDebug("Preserving newer fill for order {OrderId}; incoming {IncomingFilled}, current {Filled}, observation {ObservedAt}; TraceId {TraceId}",
                         OrderId(order), order.Filled, existing.Filled, observedAt, Activity.Current?.TraceId.ToString());
@@ -366,6 +377,10 @@ public class OrderBookService
             {
                 ReplaceAnonymous(side, order);
             }
+            if (order.Claimed >= order.Amount && !order.ClosedAt.HasValue)
+                order.ClosedAt = DateTime.UtcNow;
+            order.Filled = Math.Max(order.Filled, order.Claimed ?? 0);
+            order.IsExpired |= order.ClosedAt.HasValue;
             IndexOrder(order);
         }
         var outbidOrders = !observed && (created || order.UserId == null) && !order.IsExpired && order.Filled < order.Amount ? book.GetAllOutbidOrders(order) : new List<OrderEntry>();
@@ -494,8 +509,11 @@ public class OrderBookService
             finally { gate.Release(); }
         });
 
+        foreach (var closed in AllUserOrders.Where(o => o.ClosedAt <= DateTime.UtcNow - ClosedRetention).ToList())
+            await RemoveOrder(closed.ItemId, closed.UserId, closed.Timestamp);
+
         var itemsToRemove = lastBazaarItems.Except(currentBazaarItems).ToHashSet();
-        foreach (var order in AllUserOrders.Where(o => itemsToRemove.Contains(o.ItemId)).ToList())
+        foreach (var order in AllUserOrders.Where(o => !o.ClosedAt.HasValue && itemsToRemove.Contains(o.ItemId)).ToList())
             await RemoveOrder(order.ItemId, order.UserId, order.Timestamp);
 
         // Seven days ends matching, not ownership: expired orders can still contain unclaimed
@@ -566,17 +584,32 @@ public class OrderBookService
         {
             if (!ordersLoaded)
                 removedDuringLoad[(itemTag, userId, timestamp)] = 0;
-            // Also delete orders not loaded into memory yet.
-            await RemoveFromDb(new OrderEntry { ItemId = itemTag, UserId = userId, Timestamp = timestamp });
-            foreach (var order in IndexedOrders(ordersByItem, itemTag).Where(o => o.UserId == userId && o.Timestamp == timestamp).ToList())
+            var orders = IndexedOrders(ordersByItem, itemTag).Where(o => o.UserId == userId && o.Timestamp == timestamp).ToList();
+            // Older clients still delete orders without first sending cumulative claim evidence.
+            // Retain only what is actually known; disappearance never implies a claim.
+            if (orders.Count == 0)
+                await RemoveFromDb(new OrderEntry { ItemId = itemTag, UserId = userId, Timestamp = timestamp });
+            foreach (var order in orders)
             {
                 var id = OrderId(order);
                 marketFillTimes.TryRemove(id, out _);
-                ordersByItem[itemTag].TryRemove(id, out _);
-                ordersByUser[userId].TryRemove(id, out _);
-                BazaarTelemetry.Transition(logger, order, order.Filled, order.IsEstimate, "removed", DateTime.UtcNow);
-                if (cache.TryGetValue(itemTag, out var book))
-                    book.Remove(order);
+                if (order.ClosedAt <= DateTime.UtcNow - ClosedRetention)
+                {
+                    await RemoveFromDb(order);
+                    ordersByItem[itemTag].TryRemove(id, out _);
+                    ordersByUser[userId].TryRemove(id, out _);
+                }
+                else if (!order.ClosedAt.HasValue)
+                {
+                    var closed = order.Copy();
+                    closed.ClosedAt = DateTime.UtcNow;
+                    closed.IsExpired = true;
+                    closed.IsTopOrder = null;
+                    await InsertToDb(closed);
+                    IndexOrder(closed);
+                    BazaarTelemetry.Transition(logger, closed, order.Filled, order.IsEstimate, "closed", closed.ClosedAt.Value);
+                }
+                if (cache.TryGetValue(itemTag, out var book)) book.Remove(order);
                 var changed = RefreshTopOrders(itemTag, order.IsSell);
                 if (publish)
                     changed.Add(order);
@@ -616,7 +649,7 @@ public class OrderBookService
             });
             var observed = observation.Orders.Select(OrderId).ToHashSet();
             var removed = IndexedOrders(ordersByUser, observation.UserId).Where(o => o.PlayerName == observation.PlayerName && o.Timestamp <= observation.Timestamp
-                && !observed.Contains(OrderId(o))).ToList();
+                && !o.ClosedAt.HasValue && !observed.Contains(OrderId(o))).ToList();
             await Parallel.ForEachAsync(removed, LedgerConcurrency,
                 async (order, _) => await RemoveOrder(order.ItemId, order.UserId, order.Timestamp, publish: false));
             await PublishOrders(new() { UserId = observation.UserId, PlayerName = observation.PlayerName });
@@ -681,7 +714,7 @@ public class OrderBookService
     internal async Task AddLoadedOrder(OrderEntry order)
     {
         order.Timestamp = DatabaseTime(order.Timestamp);
-        order.IsExpired |= order.Timestamp <= DateTime.UtcNow.AddDays(-7);
+        order.IsExpired |= order.ClosedAt.HasValue || order.Timestamp <= DateTime.UtcNow.AddDays(-7);
         var gate = itemLocks.GetOrAdd(order.ItemId, _ => new(1));
         await gate.WaitAsync();
         try
@@ -689,6 +722,11 @@ public class OrderBookService
             if (removedDuringLoad.ContainsKey((order.ItemId, order.UserId, order.Timestamp))
                 || ordersByItem.TryGetValue(order.ItemId, out var owned) && owned.ContainsKey(OrderId(order)))
                 return; // A live observation/removal takes precedence over a startup database read.
+            if (order.ClosedAt <= DateTime.UtcNow - ClosedRetention)
+            {
+                await RemoveFromDb(order);
+                return;
+            }
             IndexOrder(order);
             var book = cache.GetOrAdd(order.ItemId, _ => new());
             var side = order.IsSell ? book.Sell : book.Buy;
@@ -751,6 +789,7 @@ public class OrderBookService
                 .Column(o => o.IsEstimate, cm => cm.WithName("is_estimate"))
                 .Column(o => o.IsExpired, cm => cm.WithName("is_expired"))
                 .Column(o => o.Claimed, cm => cm.WithName("claimed"))
+                .Column(o => o.ClosedAt, cm => cm.WithName("closed_at"))
                 .Column(o => o.IsTopOrder, cm => cm.Ignore())
             );
         ArgumentNullException.ThrowIfNull(sessionContainer.Session);

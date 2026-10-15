@@ -67,6 +67,161 @@ public class OrderBookServiceTests
         orderBookService = new NoDbOrderBookService(container.Object, messageApiMock.Object, itemsApiMock.Object, NullLogger<OrderBookService>.Instance);
     }
 
+    [Test]
+    public async Task FinalCumulativeClaimSurvivesRemovalAndRestoreWithoutReturningToTheBook()
+    {
+        var created = DateTime.UtcNow.AddDays(-9);
+        await orderBookService.AddOrder(new() { UserId = "owner", PlayerName = "Ekwav", ItemId = "COAL",
+            Timestamp = created, Amount = 64, Filled = 64, Claimed = 64, PricePerUnit = 2.1 });
+        await orderBookService.RemoveOrder("COAL", "owner", created);
+        var saved = orderBookService.GetSnapshotOrders("owner").Single();
+        Assert.That(saved.IsExpired, Is.True);
+        Assert.That(saved.IsEstimate, Is.False);
+        Assert.That(saved.Claimed, Is.EqualTo(64));
+        Assert.That(saved.ClosedAt, Is.GreaterThan(DateTime.UtcNow.AddMinutes(-1)));
+        Assert.That(orderBookService.GetUserOrders("owner"), Is.Empty);
+        var restored = new NoDbOrderBookService(Mock.Of<ISessionContainer>(), messageApiMock.Object,
+            itemsApiMock.Object, NullLogger<OrderBookService>.Instance);
+        await restored.AddLoadedOrder(saved);
+        Assert.That(restored.GetSnapshotOrders("owner").Single().Claimed, Is.EqualTo(64));
+        Assert.That((await restored.GetOrderBook("COAL")).Buy, Is.Empty);
+        await restored.ObservePlayerOrders(new() { UserId = "owner", PlayerName = "Ekwav",
+            Timestamp = DateTime.UtcNow, Orders = new() });
+        Assert.That(restored.GetSnapshotOrders("owner").Single().Claimed, Is.EqualTo(64));
+    }
+
+    [TestCase(null)]
+    [TestCase(16)]
+    public async Task DisappearanceRetainsOnlyKnownClaimsAndCancellationHistory(int? claimed)
+    {
+        var created = DateTime.UtcNow.AddMinutes(-2);
+        await orderBookService.AddOrder(new() { UserId = "owner", PlayerName = "Ekwav", ItemId = "COAL",
+            Timestamp = created, Amount = 64, Filled = 32, Claimed = claimed, PricePerUnit = 2.1 });
+        await orderBookService.ObservePlayerOrders(new() { UserId = "owner", PlayerName = "Ekwav",
+            Timestamp = DateTime.UtcNow, Orders = new() });
+        var closed = orderBookService.GetSnapshotOrders("owner").Single();
+        Assert.That(closed.IsExpired, Is.True);
+        Assert.That(closed.Filled, Is.EqualTo(32));
+        Assert.That(closed.Claimed, Is.EqualTo(claimed));
+        Assert.That(orderBookService.GetUserOrders("owner"), Is.Empty);
+    }
+
+    [Test]
+    public async Task RepeatedAndRegressingUpdatesCannotResurrectOrEraseAClosedClaim()
+    {
+        var created = DateTime.UtcNow.AddMinutes(-2);
+        var closedAt = DateTime.UtcNow.AddHours(-1);
+        await orderBookService.AddOrder(new() { UserId = "owner", PlayerName = "Ekwav", ItemId = "COAL",
+            Timestamp = created, Amount = 64, Filled = 64, Claimed = 64, ClosedAt = closedAt, PricePerUnit = 2.1 });
+        for (var repeat = 0; repeat < 2; repeat++)
+        {
+            await orderBookService.RemoveOrder("COAL", "owner", created);
+            await orderBookService.AddOrder(new() { UserId = "owner", PlayerName = "Ekwav", ItemId = "COAL",
+                Timestamp = created, Amount = 64, Filled = 0, Claimed = 0, ClosedAt = DateTime.UtcNow, PricePerUnit = 2.1 }, observed: true);
+        }
+        var closed = orderBookService.GetSnapshotOrders("owner").Single();
+        Assert.That(closed.Claimed, Is.EqualTo(64));
+        Assert.That(closed.Filled, Is.EqualTo(64));
+        Assert.That(closed.ClosedAt, Is.EqualTo(closedAt));
+        Assert.That(closed.IsExpired, Is.True);
+        Assert.That((await orderBookService.GetOrderBook("COAL")).Buy, Is.Empty);
+    }
+
+    [Test]
+    public async Task FailedClosureWriteIsRetriedBeforeTheClosedRecordIsPublished()
+    {
+        var created = DateTime.UtcNow.AddMinutes(-1);
+        await orderBookService.AddOrder(new() { UserId = "owner", PlayerName = "Ekwav", ItemId = "COAL",
+            Timestamp = created, Amount = 64, Filled = 32, Claimed = 16, PricePerUnit = 2.1 });
+        var writes = 0;
+        orderBookService.OnWrite = _ => ++writes == 1 ? Task.FromException(new InvalidOperationException("database unavailable")) : Task.CompletedTask;
+        Assert.ThrowsAsync<InvalidOperationException>(() => orderBookService.RemoveOrder("COAL", "owner", created));
+        Assert.That(orderBookService.GetSnapshotOrders("owner").Single().ClosedAt, Is.Null);
+        Assert.That((await orderBookService.GetOrderBook("COAL")).Buy, Has.Count.EqualTo(1));
+        await orderBookService.RemoveOrder("COAL", "owner", created);
+        Assert.That(writes, Is.EqualTo(2));
+        Assert.That(orderBookService.GetSnapshotOrders("owner").Single().ClosedAt, Is.Not.Null);
+    }
+
+    [Test]
+    public async Task LaterClaimsAdvanceClosedEvidenceTimeButStaleReplaysDoNot()
+    {
+        var created = DateTime.UtcNow.AddMinutes(-5);
+        await orderBookService.AddOrder(new() { UserId = "owner", ItemId = "COAL", Timestamp = created,
+            Amount = 64, Filled = 32, Claimed = 0, PricePerUnit = 2.1 });
+        await orderBookService.RemoveOrder("COAL", "owner", created);
+        var closedAt = orderBookService.GetSnapshotOrders("owner").Single().ClosedAt.Value;
+        var claimedAt = closedAt.AddSeconds(1);
+        await orderBookService.AddOrder(new() { UserId = "owner", ItemId = "COAL", Timestamp = created,
+            Amount = 64, Filled = 32, Claimed = 16, PricePerUnit = 2.1 }, observed: true, observedAt: claimedAt);
+        var claimed = orderBookService.GetSnapshotOrders("owner").Single();
+        Assert.That(claimed.ClosedAt, Is.EqualTo(claimedAt));
+        Assert.That(claimed.Claimed, Is.EqualTo(16));
+        foreach (var replayedClaim in new[] { 0, 16 })
+            await orderBookService.AddOrder(new() { UserId = "owner", ItemId = "COAL", Timestamp = created,
+                Amount = 64, Filled = 32, Claimed = replayedClaim, PricePerUnit = 2.1 }, observed: true,
+                observedAt: claimedAt.AddSeconds(1));
+        var replayed = orderBookService.GetSnapshotOrders("owner").Single();
+        Assert.That(replayed.ClosedAt, Is.EqualTo(claimedAt));
+        Assert.That(replayed.Claimed, Is.EqualTo(16));
+        await orderBookService.AddOrder(new() { UserId = "owner", ItemId = "COAL", Timestamp = created,
+            Amount = 64, Filled = 32, Claimed = 32, PricePerUnit = 2.1 }, observed: true, observedAt: closedAt);
+        Assert.That(orderBookService.GetSnapshotOrders("owner").Single().ClosedAt, Is.EqualTo(claimedAt),
+            "An older observation cannot move the evidence time backwards");
+    }
+
+    [Test]
+    public async Task RegressingPersonalViewPreservesPartiallyClaimedClosedFills()
+    {
+        var created = DateTime.UtcNow.AddMinutes(-2);
+        await orderBookService.AddOrder(new() { UserId = "owner", PlayerName = "Ekwav", ItemId = "COAL",
+            Timestamp = created, Amount = 64, Filled = 32, Claimed = 16, PricePerUnit = 2.1 });
+        await orderBookService.RemoveOrder("COAL", "owner", created);
+        await orderBookService.AddOrder(new() { UserId = "owner", PlayerName = "Ekwav", ItemId = "COAL",
+            Timestamp = created, Amount = 64, Filled = 0, Claimed = 0, PricePerUnit = 2.1 }, observed: true);
+        var closed = orderBookService.GetSnapshotOrders("owner").Single();
+        Assert.That(closed.Filled, Is.EqualTo(32));
+        Assert.That(closed.Claimed, Is.EqualTo(16));
+        Assert.That(closed.IsExpired, Is.True);
+    }
+
+    [Test]
+    public async Task RestoringExpiredClosedHistoryDeletesThePersistedRow()
+    {
+        var order = new OrderEntry { UserId = "owner", PlayerName = "Ekwav", ItemId = "COAL",
+            Timestamp = DateTime.UtcNow.AddDays(-20), Amount = 64, Filled = 64, Claimed = 64,
+            ClosedAt = DateTime.UtcNow.AddDays(-8), IsExpired = true };
+        await orderBookService.AddLoadedOrder(order);
+        Assert.That(orderBookService.RemovedOrder, Is.SameAs(order));
+        Assert.That(orderBookService.GetSnapshotOrders("owner"), Is.Empty);
+    }
+
+    [Test]
+    public async Task ExpiredStartupRowCannotDeleteANewerLiveObservation()
+    {
+        var created = DateTime.UtcNow.AddDays(-20);
+        await orderBookService.AddOrder(new() { UserId = "owner", ItemId = "COAL", Timestamp = created,
+            Amount = 64, Filled = 64, Claimed = 64, ClosedAt = DateTime.UtcNow });
+        await orderBookService.AddLoadedOrder(new() { UserId = "owner", ItemId = "COAL", Timestamp = created,
+            Amount = 64, Filled = 64, Claimed = 64, ClosedAt = DateTime.UtcNow.AddDays(-8) });
+        Assert.That(orderBookService.RemovedOrder, Is.Null);
+        Assert.That(orderBookService.GetSnapshotOrders("owner"), Has.Count.EqualTo(1));
+    }
+
+    [Test]
+    public async Task ClosedHistoryExpiresSevenDaysAfterClosureRatherThanOrderCreation()
+    {
+        var created = DateTime.UtcNow.AddDays(-20);
+        await orderBookService.AddLoadedOrder(new() { UserId = "owner", PlayerName = "Ekwav", ItemId = "COAL",
+            Timestamp = created, Amount = 64, Filled = 64, Claimed = 64, ClosedAt = DateTime.UtcNow.AddDays(-8), IsExpired = true });
+        Assert.That(orderBookService.GetSnapshotOrders("owner"), Is.Empty);
+        await orderBookService.AddOrder(new() { UserId = "owner", PlayerName = "Ekwav", ItemId = "COAL",
+            Timestamp = created, Amount = 64, Filled = 64, Claimed = 64, ClosedAt = DateTime.UtcNow.AddDays(-8) });
+        await orderBookService.BazaarPull(new() { Timestamp = DateTime.UtcNow, Products = new() });
+        Assert.That(orderBookService.GetSnapshotOrders("owner"), Is.Empty);
+        Assert.That(orderBookService.RemovedOrder, Is.Not.Null);
+    }
+
     [TestCase(true, true)]
     [TestCase(true, false)]
     [TestCase(false, true)]
