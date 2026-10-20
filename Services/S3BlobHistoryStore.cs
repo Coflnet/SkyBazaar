@@ -87,18 +87,36 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 return;
             }
 
+            var s3Config = BuildConfig(endpoint, region, pathStyle);
+
+            this.client = new AmazonS3Client(new BasicAWSCredentials(accessKey, secretKey), s3Config);
+            this.enabled = true;
+            logger.LogInformation("S3 cold-tier enabled: bucket={Bucket} endpoint={Endpoint} pathStyle={PathStyle}", bucket, endpoint ?? "(aws default)", pathStyle);
+        }
+
+        /// <summary>
+        /// Builds the SDK config. With a custom endpoint (R2, MinIO) the region is only used
+        /// to sign requests: assigning <see cref="ClientConfig.RegionEndpoint"/> resets
+        /// <see cref="ClientConfig.ServiceURL"/> inside the SDK, which sent every request to
+        /// s3.{region}.amazonaws.com instead of the configured endpoint.
+        /// </summary>
+        internal static AmazonS3Config BuildConfig(string endpoint, string region, bool pathStyle)
+        {
             var s3Config = new AmazonS3Config
             {
                 ForcePathStyle = pathStyle,
             };
             if (!string.IsNullOrWhiteSpace(endpoint))
+            {
                 s3Config.ServiceURL = endpoint;
-            if (!string.IsNullOrWhiteSpace(region))
+                if (!string.IsNullOrWhiteSpace(region))
+                    s3Config.AuthenticationRegion = region;
+            }
+            else if (!string.IsNullOrWhiteSpace(region))
+            {
                 s3Config.RegionEndpoint = RegionEndpoint.GetBySystemName(region);
-
-            this.client = new AmazonS3Client(new BasicAWSCredentials(accessKey, secretKey), s3Config);
-            this.enabled = true;
-            logger.LogInformation("S3 cold-tier enabled: bucket={Bucket} endpoint={Endpoint} pathStyle={PathStyle}", bucket, endpoint ?? "(aws default)", pathStyle);
+            }
+            return s3Config;
         }
 
         private static string KeyFor(string productId, int bucketId)
