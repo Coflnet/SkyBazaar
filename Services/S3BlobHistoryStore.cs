@@ -40,6 +40,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         private static readonly Prometheus.Counter blobReadMisses = Prometheus.Metrics.CreateCounter("sky_bazaar_blob_read_misses", "Cold-tier blob read returned 404");
         private static readonly Prometheus.Counter blobReadErrors = Prometheus.Metrics.CreateCounter("sky_bazaar_blob_read_errors", "Cold-tier blob read failed with an unexpected error");
         private static readonly Prometheus.Counter blobReadCacheHits = Prometheus.Metrics.CreateCounter("sky_bazaar_blob_read_cache_hits", "Cold-tier blob read served from in-process cache");
+        private static readonly Prometheus.Counter blobReadUncached = Prometheus.Metrics.CreateCounter("sky_bazaar_blob_read_uncached", "Cold-tier blob reads that bypassed the in-process cache");
         private static readonly Prometheus.Counter blobWrites = Prometheus.Metrics.CreateCounter("sky_bazaar_blob_writes", "Cold-tier blob writes");
         private static readonly Prometheus.Counter blobWriteFailures = Prometheus.Metrics.CreateCounter("sky_bazaar_blob_write_failures", "Cold-tier blob write failures");
         private static readonly Prometheus.Histogram blobReadBytes = Prometheus.Metrics.CreateHistogram("sky_bazaar_blob_read_bytes", "Compressed cold-tier blob size on read",
@@ -117,7 +118,20 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 blobReadCacheHits.Inc();
                 return cached;
             }
+            return await FetchAsync(productId, bucketId, cacheKey, cancellationToken).ConfigureAwait(false);
+        }
 
+        /// <inheritdoc/>
+        public async Task<ArchivedMinuteBlock> ReadBlobUncachedAsync(string productId, int bucketId, CancellationToken cancellationToken = default)
+        {
+            if (!enabled)
+                return null;
+            blobReadUncached.Inc();
+            return await FetchAsync(productId, bucketId, "blob:" + productId + ":" + bucketId, cancellationToken).ConfigureAwait(false);
+        }
+
+        private async Task<ArchivedMinuteBlock> FetchAsync(string productId, int bucketId, string cacheKey, CancellationToken cancellationToken)
+        {
             try
             {
                 using var response = await client.GetObjectAsync(new GetObjectRequest
@@ -224,11 +238,13 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
         private void CacheBlock(string key, ArchivedMinuteBlock block, long compressedBytes)
         {
-            // Each entry is billed at (compressed payload size + per-entry overhead).
+            // Each entry is billed at max(compressed size, decoded size estimate) + per-entry overhead:
+            // a v2 block (with order books) decodes to ~6-10 MB of managed memory while compressing
+            // to a few MB, and the cache limit must bound real memory, not wire size.
             // Sliding expiration biases the cache to keep blobs that are actually re-used
             // — i.e. when an export hits 60 blobs once they all expire together after
             // cacheTtl idle, but a popular item that is queried every minute stays hot.
-            var size = Math.Max(1, compressedBytes + perEntryOverheadBytes);
+            var size = Math.Max(1, Math.Max(compressedBytes, block.EstimatedBytes()) + perEntryOverheadBytes);
             var options = new MemoryCacheEntryOptions
             {
                 Size = size,

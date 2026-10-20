@@ -19,6 +19,12 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         /// </summary>
         Task<ArchivedMinuteBlock> ReadBlobAsync(string productId, int bucketId, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Like <see cref="ReadBlobAsync"/> but always GETs from storage, bypassing the in-process cache
+        /// (refreshes the cache afterwards). Used to verify what was actually persisted.
+        /// </summary>
+        Task<ArchivedMinuteBlock> ReadBlobUncachedAsync(string productId, int bucketId, CancellationToken cancellationToken = default);
+
         /// <summary>Write (or overwrite) the archive block for (productId, bucketId).</summary>
         Task WriteBlobAsync(ArchivedMinuteBlock block, CancellationToken cancellationToken = default);
 

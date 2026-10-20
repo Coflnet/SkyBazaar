@@ -34,6 +34,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         private const string TABLE_NAME_MINUTES_LEGACY = "QuickStatusMin";
         private const string TABLE_NAME_MINUTES = "QuickStatusMin15Day";
         private const string TABLE_NAME_SECONDS = "QuickStatusSeconds";
+        internal const int SECONDS_RETENTION_SECONDS = 60 * 60 * 24 * 60;
         private const int RECENT_HOURS_PAGE_SIZE = 512;
         private const string DEFAULT_ITEM_TAG = "STOCK_OF_STONKS";
         private static bool ranCreate;
@@ -383,9 +384,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     await session.ExecuteAsync(minuteTable.Insert(result)).ConfigureAwait(false);
                     addCount += result.Count;
                 }
-                if (length < TimeSpan.FromMinutes(10) && Random.Shared.NextDouble() > 0.1)
-                    continue;
-                Console.WriteLine($"checked {start} {minuteTable.Name} {itemId} {addCount}\t{skipped}");
+                LogChecked(length, start, minuteTable.Name, itemId, addCount, skipped);
             }
         }
 
@@ -435,9 +434,24 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 await session.ExecuteAsync(minTable.Insert(result));
                 addCount += result.Count;
             }
-            if (length < TimeSpan.FromMinutes(10) && Random.Shared.NextDouble() > 0.1)
+            LogChecked(length, start, minTable.Name, itemId, addCount, skipped);
+        }
+
+        /// <summary>
+        /// The live minute aggregation checks every product in 10 minute windows every five minutes,
+        /// printing each of them drowned out everything else in the container log.
+        /// Only windows of an hour or more (hour/day aggregation, backfill) get a line.
+        /// </summary>
+        internal static bool ShouldLogChecked(TimeSpan length)
+        {
+            return length >= TimeSpan.FromHours(1);
+        }
+
+        private static void LogChecked(TimeSpan length, DateTime start, string tableName, string itemId, int addCount, int skipped)
+        {
+            if (!ShouldLogChecked(length))
                 return;
-            Console.WriteLine($"checked {start} {minTable.Name} {itemId} {addCount}\t{skipped}");
+            Console.WriteLine($"checked {start} {tableName} {itemId} {addCount}\t{skipped}");
         }
 
         private static async Task<FifteenDayAggregatedQuickStatus> CreateBlock(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd)
@@ -520,13 +534,16 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             return results;
         }
 
-        private static void MergeHistoryResults<T>(List<AggregatedQuickStatus> target, IEnumerable<T> source, int count)
+        internal static void MergeHistoryResults<T>(List<AggregatedQuickStatus> target, IEnumerable<T> source, int count)
             where T : AggregatedQuickStatus
         {
-            var seen = target.Select(s => s.TimeStamp).ToHashSet();
+            // Dedupe on whole seconds, not exact timestamps: v1 cold-tier blobs truncated timestamps to
+            // seconds while hot rows have ms precision, so the same 5-minute row would otherwise appear
+            // twice in the hot/cold overlap. Sources are merged hot first, so the existing row wins.
+            var seen = target.Select(s => s.TimeStamp.Ticks / TimeSpan.TicksPerSecond).ToHashSet();
             foreach (var row in source.OrderByDescending(s => s.TimeStamp))
             {
-                if (!seen.Add(row.TimeStamp))
+                if (!seen.Add(row.TimeStamp.Ticks / TimeSpan.TicksPerSecond))
                     continue;
                 target.Add(row);
                 if (target.Count >= count)
@@ -654,34 +671,36 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
 
             try
             {
-                // Query current compaction strategy for recent hours table
-                var compactionResult = await session.ExecuteAsync(new SimpleStatement($"SELECT compaction, default_time_to_live FROM system_schema.tables WHERE keyspace_name = '{session.Keyspace}' AND table_name = '{TABLE_NAME_RECENT_HOURLY.ToLower()}';"));
-                var row = compactionResult.FirstOrDefault();
+                // Query current compaction strategy for recent hours and seconds tables
+                var compactionResult = await session.ExecuteAsync(new SimpleStatement($"SELECT table_name, compaction, default_time_to_live FROM system_schema.tables WHERE keyspace_name = '{session.Keyspace}' AND table_name IN ('{TABLE_NAME_RECENT_HOURLY.ToLower()}', '{TABLE_NAME_SECONDS.ToLower()}');"));
+                var rows = compactionResult.ToDictionary(row => row.GetValue<string>("table_name"));
                 var keeptime = 1209600 / 2;
-                bool needsUpdate = true;
-                if (row != null)
+                bool HasExpectedSettings(string tableName, int ttl, string windowSize)
                 {
+                    if (!rows.TryGetValue(tableName.ToLower(), out var row))
+                        return false;
                     var compaction = row.GetValue<IDictionary<string, string>>("compaction");
-                    var ttl = row.GetValue<int?>("default_time_to_live");
-                    if (compaction != null && compaction.TryGetValue("class", out var compactionClass))
-                    {
-                        if (compactionClass.Contains("TimeWindowCompactionStrategy") && ttl == keeptime)
-                        {
-                            needsUpdate = false;
-                        }
-                    }
+                    var currentTtl = row.GetValue<int?>("default_time_to_live");
+                    return compaction != null
+                        && compaction.TryGetValue("class", out var compactionClass)
+                        && compactionClass.Contains("TimeWindowCompactionStrategy")
+                        && compaction.TryGetValue("compaction_window_size", out var currentWindowSize)
+                        && currentWindowSize == windowSize
+                        && currentTtl == ttl;
                 }
+                var needsUpdate = !HasExpectedSettings(TABLE_NAME_RECENT_HOURLY, keeptime, "1")
+                    || !HasExpectedSettings(TABLE_NAME_SECONDS, SECONDS_RETENTION_SECONDS, "2");
                 if (needsUpdate)
                 {
                     await session.ExecuteAsync(new SimpleStatement(
                         $"ALTER TABLE {TABLE_NAME_RECENT_HOURLY} WITH compaction = {{'class': 'TimeWindowCompactionStrategy', 'compaction_window_size': '1', 'compaction_window_unit': 'DAYS'}} AND default_time_to_live = {keeptime};"));
                     await session.ExecuteAsync(new SimpleStatement(
-                        $"ALTER TABLE {TABLE_NAME_SECONDS} WITH compaction = {{'class': 'TimeWindowCompactionStrategy', 'compaction_window_size': '1', 'compaction_window_unit': 'DAYS'}} AND default_time_to_live = 1209600;"));
-                    logger.LogInformation("Set compaction strategy for recent hours table");
+                        $"ALTER TABLE {TABLE_NAME_SECONDS} WITH compaction = {{'class': 'TimeWindowCompactionStrategy', 'compaction_window_size': '2', 'compaction_window_unit': 'DAYS'}} AND default_time_to_live = {SECONDS_RETENTION_SECONDS};"));
+                    logger.LogInformation("Set compaction strategy and retention for recent hours and seconds tables");
                 }
                 else
                 {
-                    logger.LogInformation("Recent hours table already has the correct compaction strategy and TTL.");
+                    logger.LogInformation("Recent hours and seconds tables already have the correct compaction strategy and TTL.");
                 }
             }
             catch (Exception e)
