@@ -18,7 +18,7 @@
   <ItemGroup>
     <PackageReference Include="CassandraCSharpDriver" Version="3.22.1" />
     <PackageReference Include="Coflnet.Core" Aliases="CoflCore" Version="0.7.3" />
-    <PackageReference Include="Coflnet.Sky.EventBroker.Client" Version="0.5.5" />
+    <PackageReference Include="Coflnet.Sky.EventBroker.Client" Version="0.6.0" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc.NewtonsoftJson" Version="10.0.12" />
     <PackageReference Include="AWSSDK.S3" Version="3.7.511.8" />
   </ItemGroup>
