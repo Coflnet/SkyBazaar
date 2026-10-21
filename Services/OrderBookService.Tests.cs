@@ -52,7 +52,33 @@ public class OrderBookServiceTests
             UpdatedOrder = order;
             return OnWrite(order);
         }
+        public int SchemaCalls;
+        public List<byte[]> FetchedStates = new();
+        public Func<int, byte[], (IEnumerable<OrderEntry>, byte[])> Pages = (_, _) => (new List<OrderEntry>(), null);
+        protected override Task EnsureSchemaAsync()
+        {
+            SchemaCalls++;
+            return Task.CompletedTask;
+        }
+        protected override void InitOrderTable(Cassandra.Mapping.MappingConfiguration mapping) { }
+        protected override Task PageRetryDelay(int failures) => Task.CompletedTask;
+        protected override Task<(IEnumerable<OrderEntry> Rows, byte[] PagingState)> FetchOrderPageAsync(byte[] pagingState)
+        {
+            FetchedStates.Add(pagingState);
+            var (rows, next) = Pages(FetchedStates.Count, pagingState);
+            return Task.FromResult((rows, next));
+        }
+        public Task RunLoad() => Load();
     }
+
+    private static OrderEntry LoadedOrder(int page, int n) => new()
+    {
+        UserId = $"user{page}-{n}", PlayerName = "p", ItemId = "COAL", Timestamp = DateTime.UtcNow.AddMinutes(-page * 10 - n),
+        Amount = 10, Filled = 0, PricePerUnit = 1 + page + n * 0.1
+    };
+
+    private static byte[] State(int page) => new[] { (byte)page };
+
     private NoDbOrderBookService orderBookService;
     Mock<IItemsApi> itemsApiMock;
     Mock<IMessageApi> messageApiMock;
@@ -65,6 +91,43 @@ public class OrderBookServiceTests
         messageApiMock = new Mock<IMessageApi>();
         itemsApiMock = new Mock<IItemsApi>();
         orderBookService = new NoDbOrderBookService(container.Object, messageApiMock.Object, itemsApiMock.Object, NullLogger<OrderBookService>.Instance);
+    }
+
+    private NoDbOrderBookService LoadingService()
+    {
+        var container = new Mock<ISessionContainer>();
+        container.SetupGet(c => c.Session).Returns(new Mock<ISession>().Object);
+        return new NoDbOrderBookService(container.Object, messageApiMock.Object, itemsApiMock.Object, NullLogger<OrderBookService>.Instance);
+    }
+
+    [TestCase(3)]
+    [TestCase(1)]
+    public async Task LoadResumesFromFailedPageInsteadOfRestarting(int failingPage)
+    {
+        var service = LoadingService();
+        var failed = false;
+        var fetchCount = new int[5];
+        service.Pages = (call, state) =>
+        {
+            var page = state == null ? 1 : state[0] + 1;
+            fetchCount[page]++;
+            if (page == failingPage && !failed)
+            {
+                failed = true;
+                throw new ReadTimeoutException(ConsistencyLevel.LocalOne, 0, 1, false);
+            }
+            var rows = Enumerable.Range(0, 3).Select(n => LoadedOrder(page, n)).ToList();
+            return (rows, page == 4 ? null : State(page));
+        };
+
+        await service.RunLoad();
+
+        Assert.That(service.SchemaCalls, Is.EqualTo(1));
+        Assert.That(fetchCount.Skip(1), Is.EqualTo(Enumerable.Range(1, 4).Select(p => p == failingPage ? 2 : 1)));
+        var book = await service.GetOrderBook("COAL");
+        Assert.That(book.Buy.Count + book.Sell.Count, Is.EqualTo(12));
+        Assert.That(service.IsReady, Is.True);
+        Assert.That(BazaarTelemetry.Ready.Value, Is.EqualTo(1));
     }
 
     [Test]

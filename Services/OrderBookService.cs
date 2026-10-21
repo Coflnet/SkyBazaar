@@ -738,32 +738,75 @@ public class OrderBookService
         finally { gate.Release(); }
     }
 
+    private byte[] loadPagingState;
+    private int loadedOrderCount;
+    private int loadedPageCount;
+    private bool loadPagingFinished;
+
+    /// <summary>Fetches one page of the order_book table; the seam allows tests to fake pages.</summary>
+    protected virtual async Task<(IEnumerable<OrderEntry> Rows, byte[] PagingState)> FetchOrderPageAsync(byte[] pagingState)
+    {
+        var query = orderBookTable.Select(order => order);
+        query.SetPageSize(OrderBookLoadPageSize);
+        query.SetAutoPage(false);
+        query.SetConsistencyLevel(ConsistencyLevel.LocalOne);
+        if (pagingState != null && pagingState.Length != 0)
+            query.SetPagingState(pagingState);
+
+        var page = await query.ExecutePagedAsync().ConfigureAwait(false);
+        return (page.ToList(), page.PagingState);
+    }
+
+    /// <summary>Creates the table and runs migrations; the seam allows tests to skip the database.</summary>
+    protected virtual async Task EnsureSchemaAsync()
+    {
+        await orderBookTable.CreateIfNotExistsAsync();
+        await Migrations.AddHasBeenNotifiedMigration.EnsureColumns(sessionContainer.Session, logger);
+    }
+
+    protected virtual void InitOrderTable(MappingConfiguration mapping)
+        => orderBookTable = new Table<OrderEntry>(sessionContainer.Session, mapping);
+
+    protected virtual Task PageRetryDelay(int failures)
+        => Task.Delay(TimeSpan.FromSeconds(Math.Min(failures, 10)));
+
+    /// <summary>
+    /// Pages through the table. Paging state and counters live in fields so a failed page
+    /// (or a retry of the whole load) resumes after the last processed page instead of rescanning.
+    /// </summary>
     private async Task<int> LoadPersistedOrders()
     {
-        var loadedOrders = 0;
-        byte[] pagingState = null;
-
-        do
+        const int maxPageFailures = 20;
+        var failures = 0;
+        while (!loadPagingFinished)
         {
-            var query = orderBookTable.Select(order => order);
-            query.SetPageSize(OrderBookLoadPageSize);
-            query.SetAutoPage(false);
-            query.SetConsistencyLevel(ConsistencyLevel.LocalOne);
-            if (pagingState != null && pagingState.Length != 0)
-                query.SetPagingState(pagingState);
-
-            var page = await query.ExecutePagedAsync().ConfigureAwait(false);
-            foreach (var order in page)
+            (IEnumerable<OrderEntry> Rows, byte[] PagingState) page;
+            try
+            {
+                page = await FetchOrderPageAsync(loadPagingState).ConfigureAwait(false);
+            }
+            catch (System.Exception e)
+            {
+                failures++;
+                logger.LogWarning(e, "Loading order book page failed (failure {Failure}/{Max}); {Pages} pages / {Rows} rows loaded so far, resuming from that page",
+                    failures, maxPageFailures, loadedPageCount, loadedOrderCount);
+                if (failures >= maxPageFailures)
+                    throw;
+                await PageRetryDelay(failures).ConfigureAwait(false);
+                continue;
+            }
+            failures = 0;
+            foreach (var order in page.Rows)
             {
                 await AddLoadedOrder(order);
-                loadedOrders++;
+                loadedOrderCount++;
             }
-
-            pagingState = page.PagingState;
+            loadedPageCount++;
+            loadPagingState = page.PagingState;
+            loadPagingFinished = loadPagingState == null || loadPagingState.Length == 0;
         }
-        while (pagingState != null && pagingState.Length != 0);
 
-        return loadedOrders;
+        return loadedOrderCount;
     }
 
     internal async Task Load()
@@ -793,13 +836,12 @@ public class OrderBookService
                 .Column(o => o.IsTopOrder, cm => cm.Ignore())
             );
         ArgumentNullException.ThrowIfNull(sessionContainer.Session);
-        orderBookTable = new Table<OrderEntry>(sessionContainer.Session, mapping);
+        InitOrderTable(mapping);
         for (int i = 0; i < 100; i++)
             try
             {
 
-                await orderBookTable.CreateIfNotExistsAsync();
-                await Migrations.AddHasBeenNotifiedMigration.EnsureColumns(sessionContainer.Session, logger);
+                await EnsureSchemaAsync();
                 var loadedOrders = await LoadPersistedOrders().ConfigureAwait(false);
                 ordersLoaded = true;
                 BazaarTelemetry.Ready.Set(1);
