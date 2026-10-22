@@ -1,10 +1,12 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Coflnet.Sky.SkyBazaar.Models;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using NUnit.Framework;
@@ -433,5 +435,212 @@ public class HistoryArchiveServiceTests
         Assert.That(HistoryArchiveService.ParseMarker("empty:2026-01-01T00:00:00.0000000Z").Kind, Is.EqualTo("empty"));
         Assert.That(HistoryArchiveService.ParseMarker("done").Kind, Is.Null);
         Assert.That(HistoryArchiveService.ParseMarker(null).Kind, Is.Null);
+    }
+
+    // ---- parallel product sweeps ----
+
+    private class SweepService : HistoryArchiveService
+    {
+        public readonly string[] ProductList;
+        public Func<string, Task> OnLoad = _ => Task.CompletedTask;
+        public int Deletes;
+        public readonly ConcurrentDictionary<string, string> Markers = new();
+        public readonly ConcurrentDictionary<string, int> LoadsPerProduct = new();
+        public readonly TaskCompletionSource Complete = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int NewestCold;
+
+        public SweepService(string[] products, Dictionary<string, string> cfg)
+            : base(new BazaarService(new ConfigurationBuilder().Build(), NullLogger<BazaarService>.Instance, Mock.Of<Cassandra.ISession>()),
+                  MakeStore(), MakeRedis(out var markers), Cfg(cfg), new CapturingLogger())
+        {
+            ProductList = products;
+            Markers = markers;
+            ((CapturingLogger)Logger).Owner = this;
+            NewestCold = NewestClosedBucket(DateTime.UtcNow, 7);
+        }
+
+        private ILogger<HistoryArchiveService> Logger => (ILogger<HistoryArchiveService>)typeof(HistoryArchiveService)
+            .GetField("logger", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(this);
+
+        private static IConfiguration Cfg(Dictionary<string, string> cfg)
+        {
+            var d = new Dictionary<string, string>
+            {
+                ["HISTORY_ARCHIVE:ENABLED"] = "true",
+                ["HISTORY_ARCHIVE:START_DELAY_SECONDS"] = "0",
+                ["HISTORY_ARCHIVE:PER_PRODUCT_PAUSE_MS"] = "0",
+                ["HISTORY_ARCHIVE:PER_BUCKET_PAUSE_MS"] = "0",
+                ["HISTORY_ARCHIVE:EMPTY_STREAK_LIMIT"] = "2",
+                ["HISTORY_ARCHIVE:IDLE_BETWEEN_SWEEPS_SECONDS"] = "3600",
+                ["HISTORY_ARCHIVE:RETENTION_HOT_DAYS"] = "0",
+                ["HISTORY_ARCHIVE:DELETE_MARGIN_DAYS"] = "0",
+            };
+            foreach (var kv in cfg)
+                d[kv.Key] = kv.Value;
+            return new ConfigurationBuilder().AddInMemoryCollection(d).Build();
+        }
+
+        private static IBlobHistoryStore MakeStore()
+        {
+            var blobs = new ConcurrentDictionary<string, ArchivedMinuteBlock>();
+            var m = new Mock<IBlobHistoryStore>();
+            m.SetupGet(x => x.IsEnabled).Returns(true);
+            m.Setup(x => x.WriteBlobAsync(It.IsAny<ArchivedMinuteBlock>(), It.IsAny<CancellationToken>()))
+                .Returns<ArchivedMinuteBlock, CancellationToken>((b, _) => { blobs[b.ProductId + ":" + b.BucketId] = RoundTrip(b); return Task.CompletedTask; });
+            m.Setup(x => x.ReadBlobUncachedAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .Returns<string, int, CancellationToken>((p, b, _) => Task.FromResult(blobs.TryGetValue(p + ":" + b, out var blob) ? RoundTrip(blob) : null));
+            return m.Object;
+        }
+
+        private static IConnectionMultiplexer MakeRedis(out ConcurrentDictionary<string, string> markers)
+        {
+            var mk = new ConcurrentDictionary<string, string>();
+            markers = mk;
+            var d = new Mock<IDatabase>();
+            d.Setup(x => x.StringGetAsync(It.IsAny<RedisKey>(), It.IsAny<CommandFlags>()))
+                .Returns<RedisKey, CommandFlags>((k, _) => Task.FromResult(mk.TryGetValue(k, out var v) ? (RedisValue)v : RedisValue.Null));
+            d.Setup(x => x.KeyExistsAsync(It.IsAny<RedisKey>(), It.IsAny<CommandFlags>()))
+                .Returns<RedisKey, CommandFlags>((k, _) => Task.FromResult(mk.ContainsKey(k)));
+            d.Setup(x => x.StringSetAsync(It.IsAny<RedisKey>(), It.IsAny<RedisValue>(), It.IsAny<Expiration>(), It.IsAny<ValueCondition>(), It.IsAny<CommandFlags>()))
+                .Returns<RedisKey, RedisValue, Expiration, ValueCondition, CommandFlags>((k, v, _, _, _) => { mk[k] = v; return Task.FromResult(true); });
+            var r = new Mock<IConnectionMultiplexer>();
+            r.Setup(x => x.GetDatabase(It.IsAny<int>(), It.IsAny<object>())).Returns(d.Object);
+            return r.Object;
+        }
+
+        public ConcurrentBag<string> Messages => ((CapturingLogger)Logger).Messages;
+
+        protected override IReadOnlyList<string> GetProducts() => ProductList;
+
+        protected override async Task<List<AggregatedQuickStatus>> LoadHotRowsAsync(string productId, int bucketId, DateTime start, DateTime end)
+        {
+            LoadsPerProduct.AddOrUpdate(productId, 1, (_, n) => n + 1);
+            await OnLoad(productId).ConfigureAwait(false);
+            // data only in the 3 buckets below the newest cold bucket: old enough to be delete eligible
+            if (bucketId < NewestCold - 3 && bucketId >= NewestCold - 6)
+                return Enumerable.Range(0, 3).Select(i => new AggregatedQuickStatus
+                {
+                    ProductId = productId, TimeStamp = start.AddDays(2).AddMinutes(5 * i), Count = 5, BuyPrice = 1, SellPrice = 1, ReferenceId = i + 1,
+                    BuyOrders = new[] { new BuyOrder { Amount = 1, PricePerUnit = 1 } },
+                    SellOrders = new[] { new SellOrder { Amount = 1, PricePerUnit = 1 } }
+                }).ToList();
+            return new List<AggregatedQuickStatus>();
+        }
+
+        protected override Task<List<AggregatedQuickStatus>> LoadLegacyRowsAsync(string productId, DateTime bucketStart, DateTime bucketEnd)
+            => Task.FromResult(new List<AggregatedQuickStatus>());
+
+        protected override Task DeleteHotPartitionsAsync(string productId, int bucketId, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref Deletes);
+            return Task.CompletedTask;
+        }
+
+        protected override Task RetryBackoffAsync(TimeSpan delay, CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public async Task RunSweepAsync()
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            await StartAsync(cts.Token);
+            await Task.WhenAny(Complete.Task, Task.Delay(TimeSpan.FromSeconds(30)));
+            Assert.That(Complete.Task.IsCompleted, Is.True, "sweep did not complete");
+            await StopAsync(CancellationToken.None);
+        }
+    }
+
+    private class CapturingLogger : ILogger<HistoryArchiveService>
+    {
+        public SweepService Owner;
+        public readonly ConcurrentBag<string> Messages = new();
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception exception, Func<TState, Exception, string> formatter)
+        {
+            var msg = formatter(state, exception);
+            Messages.Add(msg);
+            if (msg.Contains("Archive sweep complete"))
+                Owner?.Complete.TrySetResult();
+        }
+    }
+
+    private static string[] Names(int n) => Enumerable.Range(0, n).Select(i => "P" + i).ToArray();
+
+    [Test]
+    public async Task ParallelProducts_AreBoundedAndActuallyConcurrent()
+    {
+        var svc = new SweepService(Names(6), new() { ["HISTORY_ARCHIVE:PARALLEL_PRODUCTS"] = "3" });
+        var inFlight = 0;
+        var max = 0;
+        var seen = new ConcurrentDictionary<string, bool>();
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        svc.OnLoad = async p =>
+        {
+            if (!seen.TryAdd(p, true))
+                return; // only gate the first load of each product
+            var now = Interlocked.Increment(ref inFlight);
+            int prev;
+            do { prev = Volatile.Read(ref max); } while (now > prev && Interlocked.CompareExchange(ref max, now, prev) != prev);
+            if (now >= 3)
+                gate.TrySetResult();
+            await Task.WhenAny(gate.Task, Task.Delay(200));
+            await Task.Delay(30);
+            Interlocked.Decrement(ref inFlight);
+        };
+        await svc.RunSweepAsync();
+        Assert.That(max, Is.LessThanOrEqualTo(3));
+        Assert.That(max, Is.GreaterThanOrEqualTo(2));
+        Assert.That(seen.Count, Is.EqualTo(6));
+        Assert.That(svc.Messages.Any(m => m.Contains("parallelProducts=3")), Is.True);
+    }
+
+    [Test]
+    public async Task ParallelProducts_DefaultIsSequential()
+    {
+        var svc = new SweepService(Names(4), new());
+        var inFlight = 0;
+        var max = 0;
+        var seen = new ConcurrentDictionary<string, bool>();
+        svc.OnLoad = async p =>
+        {
+            if (!seen.TryAdd(p, true))
+                return;
+            var now = Interlocked.Increment(ref inFlight);
+            int prev;
+            do { prev = Volatile.Read(ref max); } while (now > prev && Interlocked.CompareExchange(ref max, now, prev) != prev);
+            await Task.Delay(40);
+            Interlocked.Decrement(ref inFlight);
+        };
+        await svc.RunSweepAsync();
+        Assert.That(max, Is.EqualTo(1));
+        Assert.That(seen.Count, Is.EqualTo(4));
+    }
+
+    [Test]
+    public async Task ParallelProducts_MaxDeletesPerSweepIsNeverExceeded()
+    {
+        var svc = new SweepService(Names(3), new()
+        {
+            ["HISTORY_ARCHIVE:PARALLEL_PRODUCTS"] = "3",
+            ["HISTORY_ARCHIVE:DELETE_ARCHIVED"] = "true",
+            ["HISTORY_ARCHIVE:MAX_DELETES_PER_SWEEP"] = "5",
+            ["HISTORY_ARCHIVE:EMPTY_STREAK_LIMIT"] = "50",
+            ["HISTORY_ARCHIVE:OLDEST_BUCKET_ID"] = "0",
+        });
+        svc.OnLoad = _ => Task.Delay(1);
+        await svc.RunSweepAsync();
+        Assert.That(svc.Deletes, Is.EqualTo(5));
+    }
+
+    [Test]
+    public async Task ParallelProducts_FailingProductDoesNotStopOthers()
+    {
+        var svc = new SweepService(Names(5), new() { ["HISTORY_ARCHIVE:PARALLEL_PRODUCTS"] = "2" });
+        svc.OnLoad = p => p == "P1" ? throw new InvalidOperationException("boom") : Task.CompletedTask;
+        await svc.RunSweepAsync();
+        foreach (var p in Names(5))
+            Assert.That(svc.LoadsPerProduct.ContainsKey(p), Is.True, p);
+        Assert.That(svc.Messages.Any(m => m.Contains("problems=0")), Is.False);
+        Assert.That(svc.Messages.Any(m => m.Contains("Archive sweep complete (problems=")), Is.True);
+        Assert.That(svc.Markers.ContainsKey("bazaar_archive:v2:sweep_complete"), Is.False);
     }
 }

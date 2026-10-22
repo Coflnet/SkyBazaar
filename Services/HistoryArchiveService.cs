@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -114,6 +115,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             var emptyStreakLimit = ConfigInt("HISTORY_ARCHIVE:EMPTY_STREAK_LIMIT", 6);
             var perProductPauseMs = ConfigInt("HISTORY_ARCHIVE:PER_PRODUCT_PAUSE_MS", 250);
             var perBucketPauseMs = ConfigInt("HISTORY_ARCHIVE:PER_BUCKET_PAUSE_MS", 100);
+            var parallelProducts = Math.Max(1, ConfigInt("HISTORY_ARCHIVE:PARALLEL_PRODUCTS", 1));
             var idleBetweenSweepsSeconds = ConfigInt("HISTORY_ARCHIVE:IDLE_BETWEEN_SWEEPS_SECONDS", 3600);
 
             if (startDelaySeconds > 0)
@@ -122,7 +124,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             await MaybeDropLegacyTableAsync(stoppingToken).ConfigureAwait(false);
 
             var startOptions = ReadOptions();
-            logger.LogInformation("Starting history archive sweeps; closedForDays={ClosedForDays} oldestBucket={Oldest} deleteEnabled={Delete}", startOptions.ClosedForDays, oldestBucketId, startOptions.DeleteEnabled);
+            logger.LogInformation("Starting history archive sweeps; closedForDays={ClosedForDays} oldestBucket={Oldest} deleteEnabled={Delete} parallelProducts={Parallel}", startOptions.ClosedForDays, oldestBucketId, startOptions.DeleteEnabled, parallelProducts);
 
             while (!stoppingToken.IsCancellationRequested)
             {
@@ -140,17 +142,9 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     var now = DateTime.UtcNow;
                     var newestCold = NewestClosedBucket(now, options.ClosedForDays);
                     var db = redis.GetDatabase();
-                    deletesThisSweep = 0;
-                    var problems = 0;
+                    Interlocked.Exchange(ref deletesThisSweep, 0);
 
-                    foreach (var product in products)
-                    {
-                        if (stoppingToken.IsCancellationRequested)
-                            break;
-                        problems += await ArchiveProductAsync(product, newestCold, oldestBucketId, emptyStreakLimit, perBucketPauseMs, now, options, db, stoppingToken).ConfigureAwait(false);
-                        if (perProductPauseMs > 0)
-                            await Task.Delay(perProductPauseMs, stoppingToken).ConfigureAwait(false);
-                    }
+                    var problems = await ArchiveProductsAsync(products, parallelProducts, newestCold, oldestBucketId, emptyStreakLimit, perBucketPauseMs, perProductPauseMs, now, options, db, stoppingToken).ConfigureAwait(false);
 
                     if (stoppingToken.IsCancellationRequested)
                         break;
@@ -173,6 +167,74 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 }
             }
         }
+
+        /// <summary>
+        /// Archives the products with at most <paramref name="parallelProducts"/> in flight, a worker pool draining a shared queue
+        /// (queue order = product order). Returns the total number of problems. Cancellation propagates; any other exception of a
+        /// worker is counted as a problem and does not stop the other workers.
+        /// </summary>
+        private async Task<int> ArchiveProductsAsync(
+            IReadOnlyList<string> products,
+            int parallelProducts,
+            int newestCold,
+            int oldestBucketId,
+            int emptyStreakLimit,
+            int perBucketPauseMs,
+            int perProductPauseMs,
+            DateTime now,
+            SweepOptions options,
+            IDatabase db,
+            CancellationToken stoppingToken)
+        {
+            var queue = new ConcurrentQueue<string>(products);
+            var problems = 0;
+            var workerCount = Math.Max(1, Math.Min(parallelProducts, products.Count));
+            async Task Worker()
+            {
+                while (!stoppingToken.IsCancellationRequested && queue.TryDequeue(out var product))
+                {
+                    try
+                    {
+                        var found = await ArchiveProductAsync(product, newestCold, oldestBucketId, emptyStreakLimit, perBucketPauseMs, now, options, db, stoppingToken).ConfigureAwait(false);
+                        Interlocked.Add(ref problems, found);
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        Interlocked.Increment(ref problems);
+                        logger.LogError(ex, "Archive: worker failed on {Product}; continuing with the next product", product);
+                    }
+                    if (perProductPauseMs > 0)
+                        await Task.Delay(perProductPauseMs, stoppingToken).ConfigureAwait(false);
+                }
+            }
+            await Task.WhenAll(Enumerable.Range(0, workerCount).Select(_ => Task.Run(Worker, CancellationToken.None))).ConfigureAwait(false);
+            return Volatile.Read(ref problems);
+        }
+
+        /// <summary>Atomically reserves one delete against the per-sweep cap (0 = unlimited).</summary>
+        private bool TryReserveDelete(int max)
+        {
+            if (max <= 0)
+            {
+                Interlocked.Increment(ref deletesThisSweep);
+                return true;
+            }
+            while (true)
+            {
+                var current = Volatile.Read(ref deletesThisSweep);
+                if (current >= max)
+                    return false;
+                if (Interlocked.CompareExchange(ref deletesThisSweep, current + 1, current) == current)
+                    return true;
+            }
+        }
+
+        /// <summary>Waits before retrying a failed bucket (seam for tests).</summary>
+        protected virtual Task RetryBackoffAsync(TimeSpan delay, CancellationToken cancellationToken) => Task.Delay(delay, cancellationToken);
 
         private SweepOptions ReadOptions()
         {
@@ -367,11 +429,10 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 await db.StringSetAsync(markerKey, $"deleted:0:{Iso()}").ConfigureAwait(false);
                 return BucketOutcome.Deleted;
             }
-            if (options.MaxDeletesPerSweep > 0 && deletesThisSweep >= options.MaxDeletesPerSweep)
+            if (!TryReserveDelete(options.MaxDeletesPerSweep))
                 return outcome;
             try
             {
-                deletesThisSweep++;
                 await DeleteHotPartitionsAsync(productId, bucketId, cancellationToken).ConfigureAwait(false);
                 partitionsDeleted.Inc(2);
                 rowsDeleted.Inc(hot.Count);
@@ -451,7 +512,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     }
                     // Exponential backoff capped at 2 minutes: 5s, 10s, 20s, 40s, 80s.
                     var backoffSeconds = Math.Min(120, 5 * (int)Math.Pow(2, consecutiveFailures - 1));
-                    await Task.Delay(TimeSpan.FromSeconds(backoffSeconds), cancellationToken).ConfigureAwait(false);
+                    await RetryBackoffAsync(TimeSpan.FromSeconds(backoffSeconds), cancellationToken).ConfigureAwait(false);
                 }
             }
             return problems;
