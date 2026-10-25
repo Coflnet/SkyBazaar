@@ -17,6 +17,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
     [Route("[controller]")]
     public class OrderBookController : ControllerBase
     {
+        private static readonly System.Text.Json.JsonSerializerOptions HistoryJson = new(System.Text.Json.JsonSerializerDefaults.Web);
         private readonly OrderBookService service;
 
         /// <summary>
@@ -52,6 +53,39 @@ namespace Coflnet.Sky.SkyAuctionTracker.Controllers
         public async Task<OrderBook> GetOrderBook(string itemTag)
         {
             return await service.GetOrderBook(itemTag);
+        }
+
+        /// <summary>
+        /// INTERNAL research export: every stored order of the item placed at or after <paramref name="since"/>
+        /// (default 7 days ago, at most 8 days back), including closed, expired and claimed orders.
+        /// Single partition read, paged with an opaque <c>pagingState</c> cursor (url-safe base64).
+        /// </summary>
+        [HttpGet("{itemTag}/history")]
+        public async Task<IActionResult> GetHistory(string itemTag, DateTime? since = null, int pageSize = 1000, string pagingState = null)
+        {
+            var now = DateTime.UtcNow;
+            var from = since == null ? now - TimeSpan.FromDays(7)
+                : since.Value.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(since.Value, DateTimeKind.Utc) : since.Value.ToUniversalTime();
+            if (from < now - OrderBookService.HistoryMaxAge)
+                return BadRequest(new { code = "since_too_old", message = "since must be within the last 8 days" });
+            if (pageSize < 1 || pageSize > OrderBookService.HistoryMaxPageSize)
+                return BadRequest(new { code = "invalid_page_size", message = $"pageSize must be between 1 and {OrderBookService.HistoryMaxPageSize}" });
+            byte[] state = null;
+            if (!string.IsNullOrEmpty(pagingState))
+                try { state = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlDecode(pagingState); }
+                catch (FormatException) { return BadRequest(new { code = "invalid_paging_state", message = "pagingState is not valid" }); }
+            if (!service.IsReady) return Loading();
+            OrderBookService.HistoryPage page;
+            try { page = await service.GetHistoryPage(itemTag, from, pageSize, state); }
+            catch (OrderBookService.InvalidHistoryCursorException)
+            {
+                return BadRequest(new { code = "invalid_paging_state", message = "pagingState is not valid" });
+            }
+            return new JsonResult(new
+            {
+                items = page.Items,
+                nextPagingState = page.PagingState == null ? null : Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(page.PagingState)
+            }, HistoryJson);
         }
 
         /// <summary>

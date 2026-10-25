@@ -254,6 +254,7 @@ public class OrderBookService
                         var before = order.Filled;
                         var previousEstimate = order.IsEstimate;
                         order.Filled += filled;
+                        StampFill(order, before, timestamp);
                         order.IsEstimate = true;
                         marketFillTimes[OrderId(order)] = timestamp;
                         if (order.Filled == order.Amount)
@@ -273,6 +274,7 @@ public class OrderBookService
             var before = order.Filled;
             var previousEstimate = order.IsEstimate;
             order.Filled = order.Amount;
+            StampFill(order, before, timestamp);
             order.IsEstimate = false;
             marketFillTimes[OrderId(order)] = timestamp;
             side.Remove(order);
@@ -331,6 +333,7 @@ public class OrderBookService
         order.Timestamp = DatabaseTime(order.Timestamp);
         order.Filled = Math.Clamp(order.Filled, 0, order.Amount);
         order.IsEstimate = false; // Chat and personal order views are direct observations.
+        order.FilledAt = null; // Only this service decides when an order was filled; never trust the caller.
         order.IsExpired |= order.UserId != null && order.Timestamp <= DateTime.UtcNow.AddDays(-7);
         var book = cache.GetOrAdd(order.ItemId, _ => new());
         var side = order.IsSell ? book.Sell : book.Buy;
@@ -372,6 +375,7 @@ public class OrderBookService
                     marketFillTimes.TryRemove(OrderId(order), out _);
                 order.HasBeenNotified = existing.HasBeenNotified;
                 order.IsTopOrder = existing.IsTopOrder;
+                order.FilledAt = existing.FilledAt;
             }
             else if (!order.IsExpired)
             {
@@ -380,6 +384,8 @@ public class OrderBookService
             if (order.Claimed >= order.Amount && !order.ClosedAt.HasValue)
                 order.ClosedAt = DateTime.UtcNow;
             order.Filled = Math.Max(order.Filled, order.Claimed ?? 0);
+            if (!created)
+                StampFill(order, before, observedAt ?? DateTime.UtcNow);
             order.IsExpired |= order.ClosedAt.HasValue;
             IndexOrder(order);
         }
@@ -463,13 +469,87 @@ public class OrderBookService
     {
         if (order.UserId == null)
             return;
-        await Persist(order, "update", () => orderBookTable.Where(o => o.ItemId == order.ItemId && o.Timestamp == order.Timestamp && o.UserId == order.UserId)
-            .Select(o => new OrderEntry { HasBeenNotified = order.HasBeenNotified, Filled = order.Filled, IsEstimate = order.IsEstimate })
+        var stamped = order.FilledAt.HasValue;
+        var row = orderBookTable.Where(o => o.ItemId == order.ItemId && o.Timestamp == order.Timestamp && o.UserId == order.UserId);
+        // This partial update only includes filled_at once it is known, so unfilled orders never write it
+        await Persist(order, "update", () => (stamped
+            ? row.Select(o => new OrderEntry { HasBeenNotified = order.HasBeenNotified, Filled = order.Filled, IsEstimate = order.IsEstimate, FilledAt = order.FilledAt })
+            : row.Select(o => new OrderEntry { HasBeenNotified = order.HasBeenNotified, Filled = order.Filled, IsEstimate = order.IsEstimate }))
             .Update().ExecuteAsync());
+    }
+
+    /// <summary>
+    /// Records when this service saw the order go from not fully filled (<paramref name="before"/>) to fully filled.
+    /// Rows that were already filled when first loaded or observed stay null.
+    /// </summary>
+    internal static bool StampFill(OrderEntry order, int before, DateTime? now = null)
+    {
+        if (order.FilledAt.HasValue || order.Amount <= 0 || before >= order.Amount || order.Filled < order.Amount)
+            return false;
+        order.FilledAt = DatabaseTime(now ?? DateTime.UtcNow);
+        return true;
+    }
+
+    internal class InvalidHistoryCursorException(Exception inner) : Exception("Invalid paging state", inner);
+
+    internal record HistoryPage(List<OrderHistoryEntry> Items, byte[] PagingState);
+
+    internal const int HistoryMaxPageSize = 5000;
+    internal static readonly TimeSpan HistoryMaxAge = TimeSpan.FromDays(8);
+
+    /// <summary>Fetches one page of an item's partition from <paramref name="since"/> on; the seam allows tests to fake pages.</summary>
+    protected virtual async Task<(IEnumerable<OrderEntry> Rows, byte[] PagingState)> FetchHistoryPageAsync(string itemTag, DateTime since, int pageSize, byte[] pagingState)
+    {
+        // Single partition, clustering range on timestamp; player_name is deliberately not selected.
+        var query = orderBookTable.Where(o => o.ItemId == itemTag && o.Timestamp >= since)
+            .Select(o => new OrderEntry
+            {
+                ItemId = o.ItemId, Timestamp = o.Timestamp, UserId = o.UserId, IsSell = o.IsSell,
+                PricePerUnit = o.PricePerUnit, Amount = o.Amount, Filled = o.Filled, Claimed = o.Claimed,
+                IsExpired = o.IsExpired, ClosedAt = o.ClosedAt, IsEstimate = o.IsEstimate, FilledAt = o.FilledAt
+            });
+        query.SetPageSize(pageSize);
+        query.SetAutoPage(false);
+        query.SetConsistencyLevel(ConsistencyLevel.LocalOne);
+        if (pagingState != null && pagingState.Length != 0)
+            query.SetPagingState(pagingState);
+        var page = await query.ExecutePagedAsync().ConfigureAwait(false);
+        return (page.ToList(), page.PagingState);
+    }
+
+    /// <summary>
+    /// One page of every stored order for the item placed at or after <paramref name="since"/>, including
+    /// closed, expired and claimed ones. Never exposes player names.
+    /// </summary>
+    internal async Task<HistoryPage> GetHistoryPage(string itemTag, DateTime since, int pageSize, byte[] pagingState)
+    {
+        (IEnumerable<OrderEntry> Rows, byte[] PagingState) page;
+        try { page = await FetchHistoryPageAsync(itemTag, DatabaseTime(since), pageSize, pagingState).ConfigureAwait(false); }
+        catch (Exception e) when (pagingState is { Length: > 0 } && e is InvalidQueryException or ProtocolErrorException or ArgumentException)
+        {
+            throw new InvalidHistoryCursorException(e);
+        }
+        var (rows, next) = page;
+        var items = rows.Select(o => new OrderHistoryEntry
+        {
+            Timestamp = DateTime.SpecifyKind(o.Timestamp, DateTimeKind.Utc),
+            UserId = o.UserId,
+            IsSell = o.IsSell,
+            PricePerUnit = o.PricePerUnit,
+            Amount = o.Amount,
+            Filled = o.Filled,
+            Claimed = o.Claimed,
+            IsExpired = o.IsExpired || o.ClosedAt.HasValue || o.Timestamp <= DateTime.UtcNow.AddDays(-7),
+            ClosedAt = o.ClosedAt,
+            IsEstimate = o.IsEstimate,
+            FilledAt = o.FilledAt,
+        }).ToList();
+        return new HistoryPage(items, next != null && next.Length != 0 ? next : null);
     }
 
     protected virtual async Task InsertToDb(OrderEntry order)
     {
+        // Insert writes every mapped column, nulls included (like closed_at); FilledAt is carried over by AddOrderInternal.
         var insert = orderBookTable.Insert(order);
         insert.SetTTL(60 * 60 * 24 * 7);
         await Persist(order, "insert", () => insert.ExecuteAsync());
@@ -833,6 +913,7 @@ public class OrderBookService
                 .Column(o => o.IsExpired, cm => cm.WithName("is_expired"))
                 .Column(o => o.Claimed, cm => cm.WithName("claimed"))
                 .Column(o => o.ClosedAt, cm => cm.WithName("closed_at"))
+                .Column(o => o.FilledAt, cm => cm.WithName("filled_at"))
                 .Column(o => o.IsTopOrder, cm => cm.Ignore())
             );
         ArgumentNullException.ThrowIfNull(sessionContainer.Session);

@@ -1007,6 +1007,127 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             return loadedFlip.ToList();
         }
 
+        private const int DEPTH_EXPORT_PAGE_SIZE = 1000;
+
+        /// <summary>
+        /// Streams (start, end] in ascending order for the compact depth export, at the same cadence
+        /// as <c>GetStatus(smallestResolution: true)</c>: legacy table, 30-day S3 blocks, 15-day minute buckets
+        /// and finally the seconds table for the last 14 days. Everything is read lazily, one page or block at a time,
+        /// so the first byte can be sent early; tiers overlap only at their boundaries and a row is dropped when an
+        /// older tier already emitted that second. Rows keep their serialised order books.
+        /// </summary>
+        public IAsyncEnumerable<DepthSnapshot> StreamDepthSnapshots(string productId, DateTime start, DateTime end, CancellationToken ct = default)
+            => DropNotAfterPrevious(StreamDepthTiers(productId, start, end, ct));
+
+        /// <summary>Drops rows whose second is not after the previous emitted row (tier boundary overlaps).</summary>
+        internal static async IAsyncEnumerable<DepthSnapshot> DropNotAfterPrevious(IAsyncEnumerable<DepthSnapshot> source,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            var last = long.MinValue;
+            await foreach (var snapshot in source.WithCancellation(ct).ConfigureAwait(false))
+            {
+                if (snapshot.UnixSeconds <= last)
+                    continue;
+                last = snapshot.UnixSeconds;
+                yield return snapshot;
+            }
+        }
+
+        private async IAsyncEnumerable<DepthSnapshot> StreamDepthTiers(string productId, DateTime start, DateTime end,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            var session = await GetSession().ConfigureAwait(false);
+            var limitDate = DateTime.UtcNow - TimeSpan.FromDays(14);
+            if (start < limitDate)
+            {
+                await foreach (var snapshot in StreamOlderDepth(session, productId, start, end < limitDate ? end : limitDate, ct).ConfigureAwait(false))
+                    yield return snapshot;
+            }
+            if (end <= limitDate)
+                yield break;
+            var from = start > limitDate ? start : limitDate;
+            var table = GetSplitSmalestTable(session); // built once so the statement is prepared once, not per page
+            byte[] pagingState = null;
+            do
+            {
+                ct.ThrowIfCancellationRequested();
+                var query = table
+                    .Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > from)
+                    .OrderBy(d => d.TimeStamp);
+                query.SetConsistencyLevel(ConsistencyLevel.Quorum);
+                query.SetPageSize(DEPTH_EXPORT_PAGE_SIZE);
+                query.SetAutoPage(false);
+                if (pagingState != null && pagingState.Length != 0)
+                    query.SetPagingState(pagingState);
+                var page = await query.ExecutePagedAsync().ConfigureAwait(false);
+                foreach (var row in page)
+                    yield return DepthSnapshot.From(row);
+                pagingState = page.PagingState;
+            }
+            while (pagingState != null && pagingState.Length != 0);
+            LastSuccessfullDB = DateTime.UtcNow;
+        }
+
+        private static async IAsyncEnumerable<T> FetchPaged<T>(Mapper mapper, string query, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct, params object[] values)
+        {
+            byte[] pagingState = null;
+            do
+            {
+                ct.ThrowIfCancellationRequested();
+                var state = pagingState;
+                var cql = CreateReadCql(query, ConsistencyLevel.Quorum, values);
+                cql.WithOptions(o => { o.SetPageSize(DEPTH_EXPORT_PAGE_SIZE); if (state != null) o.SetPagingState(state); });
+                var page = await mapper.FetchPageAsync<T>(cql).ConfigureAwait(false);
+                foreach (var row in page)
+                    yield return row;
+                pagingState = page.PagingState;
+            }
+            while (pagingState != null && pagingState.Length != 0);
+        }
+
+        private async IAsyncEnumerable<DepthSnapshot> StreamOlderDepth(ISession session, string productId, DateTime start, DateTime end,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            var mapper = new Mapper(session);
+            if (!legacyMinuteTableDropped)
+            {
+                for (var quarter = SplitAggregatedQuickStatus.GetQuarterId(start); quarter <= SplitAggregatedQuickStatus.GetQuarterId(end.AddTicks(-1)); quarter++)
+                    await foreach (var row in FetchPaged<SplitAggregatedQuickStatus>(mapper, "SELECT * FROM " + TABLE_NAME_MINUTES_LEGACY
+                        + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and QuaterId = ? Order by Timestamp ASC", ct, productId, start, end, (short)quarter).ConfigureAwait(false))
+                        yield return DepthSnapshot.From(row);
+            }
+
+            if (blobStore != null && blobStore.IsEnabled)
+            {
+                var coldCutoff = DateTime.UtcNow.AddDays(-retentionHotDays);
+                if (start < coldCutoff)
+                {
+                    foreach (var bucketId in GetThirtyDayArchiveBucketIdsDescending(start, end < coldCutoff ? end : coldCutoff).Reverse())
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        ArchivedMinuteBlock block = null;
+                        try
+                        {
+                            block = await blobStore.ReadBlobAsync(productId, bucketId, ct).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            logger?.LogWarning(ex, "Cold-tier read failed for {Product} bucket {Bucket} during depth export.", productId, bucketId);
+                        }
+                        if (block == null)
+                            continue;
+                        foreach (var snapshot in DepthSnapshot.FromBlock(block, start, end))
+                            yield return snapshot;
+                    }
+                }
+            }
+
+            foreach (var bucketId in GetFifteenDayBucketIdsDescending(start, end).Reverse())
+                await foreach (var row in FetchPaged<FifteenDayAggregatedQuickStatus>(mapper, "SELECT * FROM " + TABLE_NAME_MINUTES
+                    + " where ProductId = ? and TimeStamp > ? and TimeStamp <= ? and BucketId = ? Order by Timestamp ASC", ct, productId, start, end, bucketId).ConfigureAwait(false))
+                    yield return DepthSnapshot.From(row);
+        }
+
         private static string GetTable(DateTime start, DateTime end)
         {
             var length = (end - start);

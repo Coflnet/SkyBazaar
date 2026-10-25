@@ -66,6 +66,7 @@ namespace Coflnet.Sky.SkyAuctionTracker
                 services.AddOpenTelemetry().WithTracing(b => b.AddSource(BazaarTelemetry.SourceName));
             }
             services.AddSingleton<BazaarService>();
+            services.AddSingleton<DepthExportService>();
             services.AddResponseCaching();
             services.AddResponseCompression();
             services.AddMemoryCache();

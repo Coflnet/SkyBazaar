@@ -24,6 +24,8 @@ public class OrderEntry
     public int? Claimed { get; set; }
     /// <summary>True (or unknown for legacy rows) until an observation confirms the fill.</summary>
     public bool? IsEstimate { get; set; }
+    /// <summary>First time the order was persisted as fully filled; null while open or for rows filled before this was tracked.</summary>
+    public DateTime? FilledAt { get; set; }
     /// <summary>
     /// Has the user been notified about being outbid/undercut for this order?
     /// </summary>
