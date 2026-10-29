@@ -47,8 +47,7 @@ namespace Coflnet.Sky.SkyAuctionTracker
             services.AddDbContext<HypixelContext>(
                 dbContextOptions => dbContextOptions
                     .UseMySql(Configuration["DBCONNECTION"], serverVersion)
-                    .EnableSensitiveDataLogging() // <-- These two calls are optional but help
-                    .EnableDetailedErrors()       // <-- with debugging (remove for production).
+                    .EnableDetailedErrors()
             );
             services.AddHostedService<AggregationService>();
             if (Configuration["OLD_CASSANDRA:HOSTS"] != null)

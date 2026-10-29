@@ -27,3 +27,38 @@ There are currently no configuration options.
   since `since` (default 7 days ago, at most 8 days), including closed/expired/claimed ones and `filledAt`
   (first time persisted as fully filled, null if unknown), without player names. Cluster-internal: no ingress or
   SkyApi route forwards `/OrderBook`.
+
+## External CQL TLS preparation
+
+Core 0.7.5 handles the existing `CASSANDRA` registration. To opt in, set
+`CASSANDRA:TLS:CA_CERT_PATH`, `CERT_PATH` and `KEY_PATH`; use roots in the CA
+bundle and a client leaf plus issuing intermediates in the certificate PEM.
+Keep the existing CQL account/password, hosts and keyspace. Default name
+verification uses each contacted IP. `CASSANDRA:TLS:SERVER_NAME` is an explicit
+verified identity override, including normal CN fallback for a legacy no-SAN
+server; it never disables chain or hostname validation. For the current Scylla
+listener the reviewed overlap bundle includes its actual legacy CQL CA and the
+shared root, with the verified legacy name `sky-client`.
+
+Cassandra driver 3.23.0 reloads PEM material for new physical connections through
+Core's per-connection hostname resolver; existing connections stay active. This
+relies on the driver's callback ordering and must be reverified on a driver
+upgrade. Use a writable ephemeral `HOME` for the current user's public client
+intermediate store; no root or machine trust is installed. Mount projected PEM
+files without `subPath`. When the existing `OLD_CASSANDRA:HOSTS` migration branch
+is enabled, its distinct `OLD_CASSANDRA:TLS` section must be reviewed separately.
+
+`/health/ready` reads only `SELECT key FROM system.local` with a five-second query
+budget. It is a connection diagnostic; `/ready` still requires recent successful
+CQL activity (reads can also refresh it). Promotion must prove both, plus fresh
+known-product prices/history, independent Kafka consumer progress, Redis queue
+behavior and unchanged archive safety flags.
+Current Scylla does not request client certificates: healthy TLS with password
+authentication does not prove CQL mTLS or presentation of a renewed client leaf.
+Kafka batch consumption, internal HTTP/Redis and archive credentials/flags retain
+their existing paths; no Core 0.7.6 single-topic rotation is enabled here.
+
+Server-leaf replacement is blocked separately: these clients currently verify the
+fixed name `sky-client`, while the six current server PKI roles allow per-node
+DNS/IP identities. Do not issue and deploy per-node-only leaves under this client
+configuration. Review a compatible common SAN or per-contact name migration first.

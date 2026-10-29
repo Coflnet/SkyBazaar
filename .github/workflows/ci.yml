@@ -9,6 +9,11 @@ on:
 
 jobs:
   container-ci:
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      security-events: write
     uses: Coflnet/.github/.github/workflows/container-ci.yml@main
     with:
       # auto = the promote step discovers the chart whose image.repository

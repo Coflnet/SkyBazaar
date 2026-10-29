@@ -5,6 +5,7 @@ WORKDIR /build/sky
 COPY SkyBazaar.csproj SkyBazaar.csproj
 RUN dotnet restore
 COPY . .
+RUN dotnet test SkyBazaar.csproj
 RUN dotnet publish SkyBazaar.csproj -c release -o /app
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
