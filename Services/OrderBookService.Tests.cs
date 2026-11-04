@@ -1911,5 +1911,49 @@ public class OrderBookServiceTests
         Assert.That(service.GetUserOrders("diagnostic-user").Single().Filled, Is.EqualTo(64));
     }
 
-}
+    [Test]
+    public async Task SellOrderPricedSlightlyBelowItsOwnLevelIsNotConfirmedFilled()
+    {
+        var time = DateTime.UtcNow.AddSeconds(-8);
+        await orderBookService.AddOrder(new() { UserId = "ghost", ItemId = "BADGER", Amount = 6, PricePerUnit = 674713.5, IsSell = true, Timestamp = time });
+        await orderBookService.UpdateOrderBook(new() { ItemTag = "BADGER", Timestamp = time.AddSeconds(2),
+            SellOrders = new() { new() { PricePerUnit = 674713.6, Amount = 6 } } });
+        var saved = orderBookService.GetUserOrders("ghost").Single();
+        Assert.That(saved.Filled == saved.Amount && saved.IsEstimate == false, Is.False);
+    }
 
+    [Test]
+    public async Task SellOrderClearlyUndercutByBestAskIsStillConfirmedFilled()
+    {
+        var time = DateTime.UtcNow.AddSeconds(-8);
+        await orderBookService.AddOrder(new() { UserId = "passed", ItemId = "BADGER", Amount = 6, PricePerUnit = 674713.5, IsSell = true, Timestamp = time });
+        await orderBookService.UpdateOrderBook(new() { ItemTag = "BADGER", Timestamp = time.AddSeconds(2),
+            SellOrders = new() { new() { PricePerUnit = 674718.6, Amount = 6 } } });
+        var saved = orderBookService.GetUserOrders("passed").Single();
+        Assert.That(saved.Filled, Is.EqualTo(6));
+        Assert.That(saved.IsEstimate, Is.False);
+    }
+
+    [Test]
+    public async Task SellOrderPassedByLargerLevelNearItsPriceIsStillConfirmedFilled()
+    {
+        var time = DateTime.UtcNow.AddSeconds(-8);
+        await orderBookService.AddOrder(new() { UserId = "larger", ItemId = "BADGER", Amount = 6, PricePerUnit = 674713.5, IsSell = true, Timestamp = time });
+        await orderBookService.UpdateOrderBook(new() { ItemTag = "BADGER", Timestamp = time.AddSeconds(2),
+            SellOrders = new() { new() { PricePerUnit = 674713.6, Amount = 40 } } });
+        var saved = orderBookService.GetUserOrders("larger").Single();
+        Assert.That(saved.IsEstimate, Is.False);
+    }
+
+    [Test]
+    public async Task SellOrderReallyFilledWithSmallerCompetitorAskRightAboveIsConfirmed()
+    {
+        var time = DateTime.UtcNow.AddSeconds(-8);
+        await orderBookService.AddOrder(new() { UserId = "real", ItemId = "BADGER", Amount = 6, PricePerUnit = 674713.6, IsSell = true, Timestamp = time });
+        await orderBookService.UpdateOrderBook(new() { ItemTag = "BADGER", Timestamp = time.AddSeconds(2),
+            SellOrders = new() { new() { PricePerUnit = 674713.7, Amount = 3 } } });
+        var saved = orderBookService.GetUserOrders("real").Single();
+        Assert.That(saved.Filled, Is.EqualTo(saved.Amount));
+        Assert.That(saved.IsEstimate, Is.False);
+    }
+}

@@ -269,7 +269,8 @@ public class OrderBookService
         }
         foreach (var order in IndexedOrders(ordersByItem, tag).Where(o => o.IsSell == isSell
             && !o.IsExpired && o.Timestamp > timestamp.AddDays(-7) && o.Timestamp <= timestamp && (o.Filled < o.Amount || o.IsEstimate != false)
-            && !instantBuy && PricePassed(Math.Round(o.PricePerUnit, 1))).ToList())
+            && !instantBuy && PricePassed(Math.Round(o.PricePerUnit, 1))
+            && !LikelyOwnLevel(o, bestPrice, levels.GetValueOrDefault(bestPrice))).ToList())
         {
             var before = order.Filled;
             var previousEstimate = order.IsEstimate;
@@ -289,6 +290,21 @@ public class OrderBookService
         await Parallel.ForEachAsync(changed.Values, LedgerConcurrency, async (order, _) => await UpdateInDb(order));
         await Parallel.ForEachAsync(changed.Values.Concat(topChanges).DistinctBy(o => o.UserId), LedgerConcurrency,
             async (order, _) => await PublishOrders(order));
+    }
+
+    /// <summary>
+    /// Player orders can be registered with a price slightly below the real one (the mod reconstructs it
+    /// from the chat total). The observed best level is then the order itself, not a price pass.
+    /// Tolerance: the total-coins rounding (1 coin plus tax gross-up, ~1.02 coins) spread over the amount,
+    /// never less than the 0.1 level grid. The level amount must also equal the order's total amount (the shape of
+    /// the player's own unfilled order; compared to Amount, not remaining: the FIFO estimate has usually already
+    /// marked the order filled when this runs).
+    /// </summary>
+    internal static bool LikelyOwnLevel(OrderEntry order, double bestPrice, int levelAmount)
+    {
+        var tolerance = Math.Max(0.1, 1.02 / Math.Max(1, order.Amount));
+        return Math.Abs(bestPrice - order.PricePerUnit) <= tolerance + 1e-9
+            && levelAmount == order.Amount;
     }
 
     // Called under the item lock, once per completed side update. This is transient market
