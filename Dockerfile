@@ -16,6 +16,10 @@ RUN mkdir -p ah/files
 
 ENV ASPNETCORE_URLS=http://+:8000
 
+# apt in the base image has CVE-2026-109518 (HIGH); upgrade it until the base image ships the fix.
+RUN apt-get update \
+    && apt-get install -y --only-upgrade --no-install-recommends apt libapt-pkg6.0t64 \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 10001 app-user
 USER app-user
 
