@@ -43,27 +43,23 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     logger.LogError(t.Exception, "order book background load failed");
             }, TaskScheduler.Default);
             await bazaarService.Create();
-            while (!stoppingToken.IsCancellationRequested)
-            {
-                try
-                {
-                    await GetConsumeTask(stoppingToken);
-                }
-                catch (NoHostAvailableException e)
-                {
-                    logger.LogError(e, "");
-                    logger.LogError(Newtonsoft.Json.JsonConvert.SerializeObject(e.Errors));
-                }
-                catch (Exception e)
-                {
-                    logger.LogError(e, "consume & insert");
-                }
-                logger.LogError("ended consumption");
-
-            }
+            var backoff = new ConsumeBackoff();
+            await ConsumeRetryLoop.RunAsync(
+                () => GetConsumeTask(backoff, stoppingToken),
+                backoff,
+                LogConsumeFailure,
+                Task.Delay,
+                stoppingToken);
         }
 
-        private Task GetConsumeTask(CancellationToken stoppingToken)
+        private void LogConsumeFailure(Exception e, TimeSpan wait)
+        {
+            if (e is NoHostAvailableException noHost)
+                logger.LogError(Newtonsoft.Json.JsonConvert.SerializeObject(noHost.Errors));
+            logger.LogError(e, "consume & insert failed, retrying in {delay}", wait);
+        }
+
+        private Task GetConsumeTask(ConsumeBackoff backoff, CancellationToken stoppingToken)
         {
             logger.LogInformation($"starting consumption from {config["TOPICS:BAZAAR"]}");
             return Kafka.KafkaConsumer.ConsumeBatch<BazaarPull>(config, config["TOPICS:BAZAAR"], async bazaar =>
@@ -98,6 +94,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     throw;
                 }
                 await bazaarService.CheckAggregation(session, bazaar);
+                backoff.Reset();
             }, stoppingToken, config["KAFKA:CONSUMER_GROUP"], 5);
         }
     }
