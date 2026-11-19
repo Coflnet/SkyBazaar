@@ -320,39 +320,12 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         private static string Iso() => DateTime.UtcNow.ToString("O");
 
         /// <summary>Hot rows of one bucket: both 15-day partitions of QuickStatusMin15Day.</summary>
-        protected virtual async Task<List<AggregatedQuickStatus>> LoadHotRowsAsync(string productId, int bucketId, DateTime start, DateTime end)
-        {
-            var table = BazaarService.GetSplitMinutesTable(bazaar.Session);
-            var (first, second) = ArchivedMinuteBlock.FifteenDayBucketIds(bucketId);
-            var collected = new List<AggregatedQuickStatus>();
-            foreach (var partition in new[] { first, second })
-            {
-                var rows = await table
-                    .Where(r => r.ProductId == productId && r.BucketId == partition && r.TimeStamp >= start && r.TimeStamp < end)
-                    .ExecuteAsync().ConfigureAwait(false);
-                collected.AddRange(rows);
-            }
-            collected.Sort((a, b) => a.TimeStamp.CompareTo(b.TimeStamp));
-            return collected;
-        }
+        protected virtual Task<List<AggregatedQuickStatus>> LoadHotRowsAsync(string productId, int bucketId, DateTime start, DateTime end)
+            => bazaar.LoadHotMinuteRowsAsync(productId, bucketId, start, end);
 
         /// <summary>Legacy rows of one bucket; empty without querying once the legacy table is dropped.</summary>
-        protected virtual async Task<List<AggregatedQuickStatus>> LoadLegacyRowsAsync(string productId, DateTime bucketStart, DateTime bucketEnd)
-        {
-            var collected = new List<AggregatedQuickStatus>();
-            if (ConfigBool("HISTORY_ARCHIVE:DROP_LEGACY_TABLE"))
-                return collected;
-            var table = BazaarService.GetLegacySplitMinutesTable(bazaar.Session);
-            foreach (var q in QuartersOverlapping(bucketStart, bucketEnd))
-            {
-                var rows = await table
-                    .Where(r => r.ProductId == productId && r.QuaterId == q && r.TimeStamp >= bucketStart && r.TimeStamp < bucketEnd)
-                    .ExecuteAsync().ConfigureAwait(false);
-                collected.AddRange(rows);
-            }
-            collected.Sort((a, b) => a.TimeStamp.CompareTo(b.TimeStamp));
-            return collected;
-        }
+        protected virtual Task<List<AggregatedQuickStatus>> LoadLegacyRowsAsync(string productId, DateTime bucketStart, DateTime bucketEnd)
+            => bazaar.LoadLegacyMinuteRowsAsync(productId, bucketStart, bucketEnd);
 
         /// <summary>Delete both 15-day hot partitions of the bucket (idempotent).</summary>
         protected virtual async Task DeleteHotPartitionsAsync(string productId, int bucketId, CancellationToken cancellationToken)
@@ -516,14 +489,6 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 }
             }
             return problems;
-        }
-
-        private static IEnumerable<short> QuartersOverlapping(DateTime start, DateTime end)
-        {
-            var first = SplitAggregatedQuickStatus.GetQuarterId(start);
-            var last = SplitAggregatedQuickStatus.GetQuarterId(end.AddTicks(-1));
-            for (var q = first; q <= last; q++)
-                yield return q;
         }
 
         /// <summary>

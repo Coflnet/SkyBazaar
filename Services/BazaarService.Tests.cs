@@ -55,4 +55,43 @@ public class BazaarServiceTests
         Assert.That(results.Single().SerialisedBuyOrders, Is.EqualTo(new byte[] { 1, 2, 3 }));
         Assert.That(results.Single().SerialisedSellOrders, Is.EqualTo(new byte[] { 4 }));
     }
+
+    [Test]
+    public void LiveDayAggregationStart_IsUtcMidnightTwoDaysBack()
+    {
+        var now = new DateTime(2026, 6, 10, 2, 0, 17, DateTimeKind.Utc);
+        Assert.That(BazaarService.LiveDayAggregationStart(now), Is.EqualTo(new DateTime(2026, 6, 8, 0, 0, 0, DateTimeKind.Utc)));
+    }
+
+    [Test]
+    public void ShouldAggregateDays_OnlyJustAfterTwoAmUtc()
+    {
+        var day = new DateTime(2026, 6, 10, 0, 0, 0, DateTimeKind.Utc);
+        Assert.That(BazaarService.ShouldAggregateDays(day.AddHours(2).AddSeconds(5)), Is.True);
+        Assert.That(BazaarService.ShouldAggregateDays(day.AddHours(2).AddSeconds(30)), Is.False);
+        Assert.That(BazaarService.ShouldAggregateDays(day.AddSeconds(5)), Is.False);
+        Assert.That(BazaarService.ShouldAggregateDays(day.AddHours(4).AddSeconds(5)), Is.False);
+    }
+
+    [Test]
+    public void LiveDayWindowAtTwoAm_CoversYesterday()
+    {
+        var now = new DateTime(2026, 6, 10, 2, 0, 30, DateTimeKind.Utc);
+        var start = BazaarService.LiveDayAggregationStart(now);
+        var length = TimeSpan.FromDays(2);
+        Assert.That(start + length < now, Is.True, "the loop runs this window");
+        Assert.That(start + length + length < now, Is.False, "and no further one");
+        var yesterday = new DateTime(2026, 6, 9, 0, 0, 0, DateTimeKind.Utc);
+        Assert.That(start <= yesterday && yesterday + TimeSpan.FromDays(1) <= start + length, Is.True);
+    }
+
+    [Test]
+    public void GetTable_ShortRangeBeyondSecondsRetention_FallsBackToMinuteTier()
+    {
+        var now = new DateTime(2026, 6, 10, 12, 0, 0, DateTimeKind.Utc);
+        var recent = BazaarService.GetTable(now.AddMinutes(-30), now, now);
+        var old = BazaarService.GetTable(now.AddDays(-30), now.AddDays(-30).AddMinutes(30), now);
+        Assert.That(recent, Is.EqualTo("QuickStatusSeconds"));
+        Assert.That(old, Is.EqualTo("QuickStatusMin15Day"));
+    }
 }

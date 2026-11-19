@@ -85,6 +85,8 @@ namespace Coflnet.Sky.SkyAuctionTracker
             services.AddSingleton<IBlobHistoryStore, S3BlobHistoryStore>();
             if (bool.TryParse(Configuration["HISTORY_ARCHIVE:ENABLED"], out var archiveEnabled) && archiveEnabled)
                 services.AddHostedService<HistoryArchiveService>();
+            if (bool.TryParse(Configuration["HISTORY_REBUILD:ENABLED"], out var rebuildEnabled) && rebuildEnabled)
+                services.AddHostedService<DailyHistoryRebuildService>();
             services.AddSingleton<ISessionContainer>(d => d.GetRequiredService<BazaarService>());
             services.AddSingleton<IItemsApi, ItemsApi>(d =>
             {

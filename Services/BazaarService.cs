@@ -34,7 +34,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
         private const string TABLE_NAME_MINUTES_LEGACY = "QuickStatusMin";
         private const string TABLE_NAME_MINUTES = "QuickStatusMin15Day";
         private const string TABLE_NAME_SECONDS = "QuickStatusSeconds";
-        internal const int SECONDS_RETENTION_SECONDS = 60 * 60 * 24 * 60;
+        internal const int SECONDS_RETENTION_SECONDS = 60 * 60 * 24 * 21;
         private const int RECENT_HOURS_PAGE_SIZE = 512;
         private const string DEFAULT_ITEM_TAG = "STOCK_OF_STONKS";
         private static bool ranCreate;
@@ -236,11 +236,11 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 }
             }
 
-            if (IsTimestampWithinGroup(timestamp, TimeSpan.FromDays(1)))
+            if (!ShouldAggregateDays(timestamp))
                 return;
             foreach (var itemId in ids)
             {
-                await AggregateDays(session, DateTime.UtcNow - TimeSpan.FromDays(2), itemId);
+                await AggregateDays(session, LiveDayAggregationStart(DateTime.UtcNow), itemId);
             }
         }
 
@@ -310,11 +310,30 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             await Task.Delay(10000);
         }
 
+        /// <summary>
+        /// First day the live daily run looks at: UTC midnight two days back. The run happens right after 02:00 UTC (see
+        /// <see cref="ShouldAggregateDays"/>), so the window [D-2, D) covers D-2 (already present, skipped by its count) and D-1,
+        /// whose last 2-hour block [22:00, 24:00) is aggregated earlier in that same run.
+        /// </summary>
+        internal static DateTime LiveDayAggregationStart(DateTime now) => (now - TimeSpan.FromDays(2)).RoundDown(TimeSpan.FromDays(1));
+
+        /// <summary>
+        /// True for the first run after the 02:00 UTC boundary (same 20 s crossing logic as <see cref="IsTimestampWithinGroup"/>).
+        /// The last 2-hour block of a day only exists once the 02:00 hour run has aggregated it.
+        /// </summary>
+        internal static bool ShouldAggregateDays(DateTime timestamp)
+            => !IsTimestampWithinGroup(timestamp - TimeSpan.FromHours(2), TimeSpan.FromDays(1));
+
         private static async Task AggregateDays(ISession session, DateTime startDate, string itemId)
         {
+            startDate = startDate.RoundDown(TimeSpan.FromDays(1));
             await AggregateDaysData(session, startDate, TimeSpan.FromDays(2), itemId, GetNewDaysTable(session), async (a, b, c, d) =>
             {
                 var block = await CreateBlockAggregated(a, b, c, d, GetSplitHoursTable(a));
+                if (block == null)
+                    return null;
+                // canonical daily timestamp: day start 00:00 UTC, same as the rebuild job
+                block.TimeStamp = c.RoundDown(TimeSpan.FromDays(1));
                 return block;
             }, TimeSpan.FromDays(1));
 
@@ -466,10 +485,11 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             if (block.Count() == 0)
                 return null; // no data for this 
             var result = new AggregatedQuickStatus(block.First());
-            result.MaxBuy = (float)block.Max(b => b.BuyPrice);
-            result.MaxSell = (float)block.Max(b => b.SellPrice);
-            result.MinBuy = (float)block.Min(b => b.BuyPrice);
-            result.MinSell = (float)block.Min(b => b.SellPrice);
+            // a price of 0 means "no orders on that side", never let it become the minimum
+            result.MaxBuy = (float)HistoryAggregation.MaxPositive(block.Select(b => b.BuyPrice));
+            result.MaxSell = (float)HistoryAggregation.MaxPositive(block.Select(b => b.SellPrice));
+            result.MinBuy = (float)HistoryAggregation.MinPositive(block.Select(b => b.BuyPrice));
+            result.MinSell = (float)HistoryAggregation.MinPositive(block.Select(b => b.SellPrice));
             result.Count = (short)block.Count();
             return new FifteenDayAggregatedQuickStatus(result);
         }
@@ -479,15 +499,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             var block = (await startingTable.Where(a => a.ProductId == itemId && a.TimeStamp >= detailedStart && a.TimeStamp < detailedEnd && a.QuaterId == quarter).ExecuteAsync()).ToList();
             if (block.Count() == 0)
                 return null; // no data for this 
-            var result = new AggregatedQuickStatus(block.First())
-            {
-                MaxBuy = (float)block.Max(b => b.MaxBuy),
-                MaxSell = (float)block.Max(b => b.MaxSell),
-                MinBuy = (float)block.Min(b => b.MinBuy),
-                MinSell = (float)block.Min(b => b.MinSell),
-                Count = (short)block.Sum(b => b.Count)
-            };
-            return new(result);
+            var children = block.Cast<AggregatedQuickStatus>().ToList();
+            return new(HistoryAggregation.Aggregate(children, children[0].TimeStamp));
         }
 
         private static async Task<SplitAggregatedQuickStatus> CreateBlockAggregated(ISession session, string itemId, DateTime detailedStart, DateTime detailedEnd, Table<FifteenDayAggregatedQuickStatus> startingTable)
@@ -495,15 +508,8 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             var block = await LoadMinuteAggregateRange(startingTable, itemId, detailedStart, detailedEnd).ConfigureAwait(false);
             if (block.Count == 0)
                 return await CreateBlockAggregated(session, itemId, detailedStart, detailedEnd, GetLegacySplitMinutesTable(session)).ConfigureAwait(false);
-            var result = new AggregatedQuickStatus(block.First())
-            {
-                MaxBuy = (float)block.Max(b => b.MaxBuy),
-                MaxSell = (float)block.Max(b => b.MaxSell),
-                MinBuy = (float)block.Min(b => b.MinBuy),
-                MinSell = (float)block.Min(b => b.MinSell),
-                Count = (short)block.Sum(b => b.Count)
-            };
-            return new SplitAggregatedQuickStatus(result);
+            var children = block.Cast<AggregatedQuickStatus>().ToList();
+            return new SplitAggregatedQuickStatus(HistoryAggregation.Aggregate(children, children[0].TimeStamp));
         }
 
         private static IEnumerable<int> GetFifteenDayBucketIdsDescending(DateTime start, DateTime end)
@@ -574,6 +580,41 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
             if (consistency.HasValue)
                 cql.WithOptions(options => options.SetConsistencyLevel(consistency.Value));
             return cql;
+        }
+
+        /// <summary>Hot 5-minute rows of one 30-day archive bucket: both 15-day partitions of QuickStatusMin15Day, ascending.</summary>
+        internal async Task<List<AggregatedQuickStatus>> LoadHotMinuteRowsAsync(string productId, int bucketId, DateTime start, DateTime end)
+        {
+            var table = GetSplitMinutesTable(_session);
+            var (first, second) = ArchivedMinuteBlock.FifteenDayBucketIds(bucketId);
+            var collected = new List<AggregatedQuickStatus>();
+            foreach (var partition in new[] { first, second })
+            {
+                var rows = await table
+                    .Where(r => r.ProductId == productId && r.BucketId == partition && r.TimeStamp >= start && r.TimeStamp < end)
+                    .ExecuteAsync().ConfigureAwait(false);
+                collected.AddRange(rows);
+            }
+            collected.Sort((a, b) => a.TimeStamp.CompareTo(b.TimeStamp));
+            return collected;
+        }
+
+        /// <summary>Legacy 5-minute rows of [start, end); empty without querying once the legacy table is dropped.</summary>
+        internal async Task<List<AggregatedQuickStatus>> LoadLegacyMinuteRowsAsync(string productId, DateTime start, DateTime end)
+        {
+            var collected = new List<AggregatedQuickStatus>();
+            if (legacyMinuteTableDropped)
+                return collected;
+            var table = GetLegacySplitMinutesTable(_session);
+            foreach (var quarter in GetQuarterIdsDescending(start, end).Reverse())
+            {
+                var rows = await table
+                    .Where(r => r.ProductId == productId && r.QuaterId == quarter && r.TimeStamp >= start && r.TimeStamp < end)
+                    .ExecuteAsync().ConfigureAwait(false);
+                collected.AddRange(rows);
+            }
+            collected.Sort((a, b) => a.TimeStamp.CompareTo(b.TimeStamp));
+            return collected;
         }
 
         private async Task<List<AggregatedQuickStatus>> LoadMinuteHistory(ISession session, string productId, DateTime start, DateTime end, int count, ConsistencyLevel? consistency = null)
@@ -977,7 +1018,7 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                 return result;
             }
 
-            string tableName = GetTable(start, end);
+            string tableName = GetTable(start, end, DateTime.UtcNow);
             //return await GetSmalestTable(session).Where(f => f.ProductId == productId && f.TimeStamp <= end && f.TimeStamp > start).Take(count).ExecuteAsync();
             if (tableName == TABLE_NAME_SECONDS)
             {
@@ -1128,11 +1169,12 @@ namespace Coflnet.Sky.SkyAuctionTracker.Services
                     yield return DepthSnapshot.From(row);
         }
 
-        private static string GetTable(DateTime start, DateTime end)
+        internal static string GetTable(DateTime start, DateTime end, DateTime now)
         {
             var length = (end - start);
+            // the seconds table only keeps SECONDS_RETENTION_SECONDS, older short ranges come from the 5-minute tier
             if (length < TimeSpan.FromHours(1))
-                return TABLE_NAME_SECONDS;  // one every 10/20 seconds
+                return start < now.AddSeconds(-SECONDS_RETENTION_SECONDS) ? TABLE_NAME_MINUTES : TABLE_NAME_SECONDS;  // one every 10/20 seconds
             if (length < TimeSpan.FromHours(24))
                 return TABLE_NAME_MINUTES; // 1 per 5 min
             if (length < TimeSpan.FromDays(7.01f))

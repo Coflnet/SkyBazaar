@@ -238,9 +238,19 @@ public class HistoryArchiveServiceTests
     {
         var o = new SweepOptions(7, 1, 0, true, false, 0);
         var end = ArchivedMinuteBlock.BucketEnd(Bucket);
-        Assert.That(HistoryArchiveService.IsDeleteEligible(Bucket, end.AddDays(60), o), Is.False);
-        Assert.That(HistoryArchiveService.IsDeleteEligible(Bucket, end.AddDays(61).AddMinutes(1), o), Is.True);
-        Assert.That(BazaarService.SECONDS_RETENTION_SECONDS / 86400, Is.EqualTo(60));
+        Assert.That(HistoryArchiveService.IsDeleteEligible(Bucket, end.AddDays(21), o), Is.False);
+        Assert.That(HistoryArchiveService.IsDeleteEligible(Bucket, end.AddDays(22).AddMinutes(1), o), Is.True);
+        Assert.That(BazaarService.SECONDS_RETENTION_SECONDS / 86400, Is.EqualTo(21));
+    }
+
+    [Test]
+    public void IsDeleteEligible_DefaultConfigKeepsSixtyOneDayFloor_NotTwentyTwo()
+    {
+        var defaults = new SweepOptions(7, 30, 31, true, false, 0);
+        var end = ArchivedMinuteBlock.BucketEnd(Bucket);
+        Assert.That(HistoryArchiveService.IsDeleteEligible(Bucket, end.AddDays(22), defaults), Is.False);
+        Assert.That(HistoryArchiveService.IsDeleteEligible(Bucket, end.AddDays(60), defaults), Is.False);
+        Assert.That(HistoryArchiveService.IsDeleteEligible(Bucket, end.AddDays(61).AddMinutes(1), defaults), Is.True);
     }
 
     // ---- ProcessBucket ----
